@@ -188,6 +188,8 @@ const ICONS = {
   settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/>',
   burger: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  collapse: '<path d="m11 17-5-5 5-5M18 17l-5-5 5-5"/>',
+  expand: '<path d="m6 17 5-5-5-5M13 17l5-5-5-5"/>',
 };
 
 function icon(name) {
@@ -222,6 +224,7 @@ function layout(content) {
         <div class="brand">
           <span class="brand-logo">${icon("logo")}</span>
           <span class="brand-name">${esc(state.settings.cafe_name)}</span>
+          <button class="side-toggle" id="side-toggle"></button>
         </div>
         <nav class="side-nav">
           ${navGroups().map(([title, items]) => `
@@ -250,6 +253,18 @@ function layout(content) {
       </div>
     </div>`;
   $("#logout-btn").addEventListener("click", logout);
+  const toggle = $("#side-toggle");
+  const syncToggle = () => {
+    const collapsed = document.body.classList.contains("side-collapsed");
+    toggle.innerHTML = icon(collapsed ? "expand" : "collapse");
+    toggle.title = collapsed ? "Menyuni ochish" : "Menyuni yig'ish";
+  };
+  toggle.addEventListener("click", () => {
+    const collapsed = document.body.classList.toggle("side-collapsed");
+    try { localStorage.setItem("side-collapsed", collapsed ? "1" : "0"); } catch { /* ruxsat yo'q */ }
+    syncToggle();
+  });
+  syncToggle();
   $("#burger").addEventListener("click", () => document.body.classList.toggle("nav-open"));
   $("#side-backdrop").addEventListener("click", () => document.body.classList.remove("nav-open"));
   document.body.classList.remove("nav-open");
@@ -1227,6 +1242,14 @@ async function router() {
 }
 
 window.addEventListener("hashchange", router);
+
+// Yon panel holati: saqlangan bo'lsa shu, bo'lmasa kichik ekranda yig'ilgan
+(function initSidebar() {
+  let saved = null;
+  try { saved = localStorage.getItem("side-collapsed"); } catch { /* ruxsat yo'q */ }
+  const collapsed = saved === null ? window.innerWidth <= 1150 : saved === "1";
+  document.body.classList.toggle("side-collapsed", collapsed);
+})();
 
 (async function start() {
   try {

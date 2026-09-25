@@ -175,13 +175,33 @@ label span { display: block; font-size: 13px; color: var(--muted); margin-bottom
 .mobile-bar { display: none; }
 .side-backdrop { display: none; }
 
-/* O'rta ekran: faqat ikonkalar */
-@media (max-width: 1150px) and (min-width: 761px) {
-  :root { --side-width: 76px; }
-  .sidebar .brand-name, .side-nav a span, .nav-group, .who { display: none; }
-  .brand { justify-content: center; padding: 0 0 18px; }
-  .side-nav a { justify-content: center; padding: 12px; }
-  .side-user { flex-direction: column; padding: 12px 0 0; }
+/* Yig'ilgan panel: faqat ikonkalar (« / » tugmasi) */
+.side-toggle {
+  margin-left: auto;
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  border: 0;
+  background: rgba(255, 255, 255, .06);
+  color: var(--side-text);
+  display: grid; place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.side-toggle:hover { background: rgba(255, 255, 255, .12); color: #fff; }
+.side-toggle .icon { width: 16px; height: 16px; }
+.sidebar { transition: width .2s ease; overflow: hidden; }
+@media (min-width: 761px) {
+  body.side-collapsed { --side-width: 76px; }
+  body.side-collapsed .sidebar .brand-name,
+  body.side-collapsed .brand-logo,
+  body.side-collapsed .side-nav a span,
+  body.side-collapsed .who { display: none; }
+  body.side-collapsed .nav-group { font-size: 0; padding: 10px 0 4px; margin: 0 14px; border-top: 1px solid rgba(255, 255, 255, .08); }
+  body.side-collapsed .nav-group:first-child { border-top: 0; }
+  body.side-collapsed .brand { justify-content: center; padding: 4px 0 14px; }
+  body.side-collapsed .side-toggle { margin: 0; width: 40px; height: 40px; }
+  body.side-collapsed .side-nav a { justify-content: center; padding: 12px; }
+  body.side-collapsed .side-user { flex-direction: column; padding: 12px 0 0; }
 }
 
 /* Telefon: menyu ☰ tugmasi bilan ochiladi */
@@ -194,6 +214,7 @@ label span { display: block; font-size: 13px; color: var(--muted); margin-bottom
     box-shadow: 0 0 40px rgba(0, 0, 0, .3);
   }
   body.nav-open .sidebar { transform: none; }
+  .side-toggle { display: none; }
   body.nav-open .side-backdrop { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, .4); z-index: 30; }
   .mobile-bar {
     display: flex;
