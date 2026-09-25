@@ -25,6 +25,8 @@ import printing
 from printing import PrintError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+mimetypes.add_type("application/manifest+json", ".webmanifest")
+mimetypes.add_type("application/javascript", ".js")  # Windows reestri boshqacha bo'lishi mumkin
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOAD_DIR = os.environ.get("CAFEPOS_UPLOADS", os.path.join(BASE_DIR, "uploads"))
 MAX_BODY = 8 * 1024 * 1024
@@ -1216,7 +1218,7 @@ class Handler(BaseHTTPRequestHandler):
         with open(full, "rb") as f:
             body = f.read()
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
-        if ctype.startswith("text/") or ctype == "application/javascript":
+        if ctype.startswith("text/") or ctype in ("application/javascript", "application/manifest+json"):
             ctype += "; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", ctype)

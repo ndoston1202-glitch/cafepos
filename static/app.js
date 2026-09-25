@@ -140,6 +140,83 @@ function formData(form) {
 
 // ------------------------------------------------------------ login
 
+// ------------------------------------------------------------ telefonga ilova qilib o'rnatish
+
+let installPrompt = null;
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  $$(".install-btn").forEach((b) => b.classList.remove("hidden"));
+});
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  $$(".install-btn").forEach((b) => b.classList.add("hidden"));
+  toast("CafePOS ilova sifatida o'rnatildi ✅");
+});
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+
+function installButton(extraClass = "") {
+  if (isStandalone()) return "";
+  return `<button type="button" class="install-btn ${extraClass}" data-install>📲 Telefonga ilova qilib o'rnatish</button>`;
+}
+
+function bindInstallButtons(root = document) {
+  $$("[data-install]", root).forEach((b) => b.addEventListener("click", installApp));
+}
+
+async function installApp() {
+  if (installPrompt) {
+    installPrompt.prompt();
+    await installPrompt.userChoice.catch(() => {});
+    installPrompt = null;
+    return;
+  }
+  showInstallHelp();
+}
+
+function showInstallHelp() {
+  const origin = location.origin;
+  const insecure = !window.isSecureContext;
+  const android = `
+    <h3>🤖 Android (Chrome)</h3>
+    ${insecure ? `
+    <p class="muted">Birinchi marta, bir martalik sozlama (Wi-Fi manzil uchun Chrome shuni talab qiladi):</p>
+    <ol>
+      <li>Chrome manzil qatoriga yozing: <code class="copyable">chrome://flags</code></li>
+      <li>Qidiruvga yozing: <b>Insecure origins treated as secure</b></li>
+      <li>Maydonga shu manzilni yozing: <code class="copyable">${esc(origin)}</code></li>
+      <li>O'ng tomonda <b>Enabled</b> ni tanlang va pastdagi <b>Relaunch</b> ni bosing</li>
+    </ol>` : ""}
+    <ol ${insecure ? 'start="5"' : ""}>
+      <li>CafePOS'ni oching: <code>${esc(origin)}</code></li>
+      <li>Yuqoridagi <b>⋮</b> menyu → <b>"Ilovani o'rnatish" / "Установить приложение"</b></li>
+      <li>Bosh ekranda <b>CafePOS</b> ikonkasi paydo bo'ladi — u Chrome'siz, alohida oynada ochiladi</li>
+    </ol>`;
+  const ios = `
+    <h3>🍏 iPhone / iPad (Safari)</h3>
+    <ol>
+      <li>CafePOS'ni <b>Safari</b>'da oching: <code>${esc(origin)}</code></li>
+      <li>Pastdagi <b>Ulashish</b> tugmasi (kvadrat va yuqoriga strelka)</li>
+      <li><b>"Na ekran «Domoy»" / "Add to Home Screen"</b> → <b>Qo'shish</b></li>
+    </ol>`;
+  openModal(`
+    <div class="modal-head"><h2>📲 Telefonga ilova qilib o'rnatish</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Yopish">✕</button></div>
+    <div class="install-help">${isIOS() ? ios + android : android + ios}
+      <p class="muted">O'rnatilgach CafePOS bosh ekrandan o'z ikonkasi bilan, brauzer paneli va Google logosisiz ochiladi.</p>
+    </div>
+    <div class="actions"><button class="btn primary" data-close>Tushunarli</button></div>`, (m) => {
+    $$(".copyable", m).forEach((c) => c.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(c.textContent); toast("Nusxa olindi"); } catch { /* ruxsat yo'q */ }
+    }));
+  });
+}
+
 function renderLogin() {
   $("#app").innerHTML = `
     <div class="auth">
@@ -170,8 +247,10 @@ function renderLogin() {
         <button class="auth-submit">Kirish</button>
         <div class="auth-divider"><span>CafePos · ERP dasturi</span></div>
         <p class="auth-note">Login va parolni administratoringizdan oling</p>
+        ${installButton("auth-install")}
       </form>
     </div>`;
+  bindInstallButtons($("#app"));
   $("#toggle-password").addEventListener("click", () => {
     const input = $("input[name=password]");
     input.type = input.type === "password" ? "text" : "password";
@@ -272,6 +351,7 @@ function layout(content) {
                 ${icon(ic)}<span>${name}</span>
               </a>`).join("")}`).join("")}
         </nav>
+        ${installButton("side-install")}
         <div class="side-user">
           <div class="avatar">${esc(initials)}</div>
           <div class="who">
@@ -292,6 +372,7 @@ function layout(content) {
       </div>
     </div>`;
   $("#logout-btn").addEventListener("click", logout);
+  bindInstallButtons($("#app"));
   const toggle = $("#side-toggle");
   const syncToggle = () => {
     const collapsed = document.body.classList.contains("side-collapsed");
@@ -1344,6 +1425,7 @@ async function viewSettings() {
         : `<p class="error">Kompyuter Wi-Fi yoki tarmoqqa ulanmagan ko'rinadi.</p>`}
       ${network.others.length ? `<details class="muted"><summary>Boshqa manzillar (VPN, virtual adapterlar — odatda kerak emas)</summary>
         ${network.others.map((u) => `<div><code>${esc(u)}</code></div>`).join("")}</details>` : ""}
+      <p><button type="button" class="btn" id="install-help">📲 Telefonga ilova qilib o'rnatish — yo'riqnoma</button></p>
       <h4>Ochilmasa:</h4>
       <ol class="muted help-list">
         <li>Dastur papkasidagi <b>TARMOQQA_RUXSAT.bat</b> ni ishga tushiring va administrator ruxsatiga <b>"Да"</b> bosing.
@@ -1354,6 +1436,7 @@ async function viewSettings() {
       </ol>
     </div>`);
 
+  $("#install-help").addEventListener("click", showInstallHelp);
   $$("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(b.dataset.copy);

@@ -578,6 +578,37 @@ tr.inactive td { opacity: .5; }
 .network-panel details code { font-size: 13px; }
 .lan-url code { font-size: 18px; font-weight: 700; background: var(--bg); padding: 8px 12px; border-radius: 8px; color: var(--primary); }
 
+/* --- telefonga o'rnatish */
+.install-btn {
+  display: none;
+  width: 100%;
+  border: 1px dashed rgba(208, 138, 76, .6);
+  background: rgba(208, 138, 76, .08);
+  color: #e3a063;
+  border-radius: 10px;
+  padding: 10px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.auth-install { margin-top: 14px; color: #a8622c; background: #fbf5ee; }
+.side-install { margin-top: 10px; }
+@media (max-width: 760px) {
+  .install-btn { display: block; }
+}
+.install-btn.hidden { display: none !important; }
+.install-help h3 { margin: 14px 0 6px; font-size: 16px; }
+.install-help ol { padding-left: 22px; line-height: 1.6; margin: 0 0 6px; }
+.install-help code { background: var(--bg); padding: 2px 6px; border-radius: 5px; font-size: 13px; word-break: break-all; }
+.install-help code.copyable { cursor: pointer; color: var(--primary); }
+.modal:has(.install-help) { max-width: 520px; }
+/* Ilova rejimida (o'rnatilgan) telefon: status panel ostidan joy */
+@media (display-mode: standalone) {
+  .mobile-bar { padding-top: max(10px, env(safe-area-inset-top)); }
+  .install-btn { display: none !important; }
+}
+
 /* --- jadval */
 table.list { width: 100%; border-collapse: collapse; }
 table.list th, table.list td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; }

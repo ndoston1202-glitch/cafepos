@@ -67,6 +67,19 @@ Ruxsat serverda tekshiriladi va darhol kuchga kiradi.
 
 Maslahat: kompyuterga routerda doimiy IP bering, shunda manzil o'zgarmaydi.
 
+### 📲 Telefonga ilova qilib o'rnatish (brauzer panelisiz)
+
+CafePOS o'rnatiladigan veb-ilova (PWA): bosh ekranda o'z ikonkasi bilan, Chrome/Safari panelisiz ochiladi.
+
+**Android (Chrome)** — Wi-Fi manzil `http://` bo'lgani uchun bir martalik sozlama kerak:
+1. Chrome'da `chrome://flags` → **Insecure origins treated as secure**
+2. Maydonga CafePOS manzilini yozing (masalan `http://192.168.1.10:8000`) → **Enabled** → **Relaunch**
+3. CafePOS'ni oching → **⋮** → **Ilovani o'rnatish / Установить приложение**
+
+**iPhone (Safari)**: CafePOS'ni oching → **Ulashish** → **Add to Home Screen / На экран «Домой»**
+
+Yo'riqnoma dasturning o'zida ham bor: kirish sahifasida (telefonda) va ⚙️ Sozlamalar bo'limida.
+
 ## 🍳 Oshxona printerlari
 
 1. Printerni kompyuterga **USB yoki Wi-Fi** orqali ulang va Windows'da drayverini o'rnating
