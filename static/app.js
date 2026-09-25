@@ -143,6 +143,9 @@ function formData(form) {
 // ------------------------------------------------------------ telefonga ilova qilib o'rnatish
 
 let installPrompt = null;
+const APK_URL = "https://github.com/ndoston1202-glitch/cafepos/releases/download/android-latest/CafePOS.apk";
+// CafePOS Android ilovasi ichida ochilganmi (ilova window.CafePOSApp ni beradi)
+const inAndroidApp = () => !!window.CafePOSApp;
 const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 
@@ -161,12 +164,16 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
 }
 
 function installButton(extraClass = "") {
+  if (inAndroidApp()) {
+    return `<button type="button" class="install-btn ${extraClass}" data-change-server>🔌 Server manzilini o'zgartirish</button>`;
+  }
   if (isStandalone()) return "";
   return `<button type="button" class="install-btn ${extraClass}" data-install>📲 Telefonga ilova qilib o'rnatish</button>`;
 }
 
 function bindInstallButtons(root = document) {
   $$("[data-install]", root).forEach((b) => b.addEventListener("click", installApp));
+  $$("[data-change-server]", root).forEach((b) => b.addEventListener("click", () => window.CafePOSApp.changeServer()));
 }
 
 async function installApp() {
@@ -181,21 +188,15 @@ async function installApp() {
 
 function showInstallHelp() {
   const origin = location.origin;
-  const insecure = !window.isSecureContext;
   const android = `
-    <h3>🤖 Android (Chrome)</h3>
-    ${insecure ? `
-    <p class="muted">Birinchi marta, bir martalik sozlama (Wi-Fi manzil uchun Chrome shuni talab qiladi):</p>
+    <h3>🤖 Android</h3>
     <ol>
-      <li>Chrome manzil qatoriga yozing: <code class="copyable">chrome://flags</code></li>
-      <li>Qidiruvga yozing: <b>Insecure origins treated as secure</b></li>
-      <li>Maydonga shu manzilni yozing: <code class="copyable">${esc(origin)}</code></li>
-      <li>O'ng tomonda <b>Enabled</b> ni tanlang va pastdagi <b>Relaunch</b> ni bosing</li>
-    </ol>` : ""}
-    <ol ${insecure ? 'start="5"' : ""}>
-      <li>CafePOS'ni oching: <code>${esc(origin)}</code></li>
-      <li>Yuqoridagi <b>⋮</b> menyu → <b>"Ilovani o'rnatish" / "Установить приложение"</b></li>
-      <li>Bosh ekranda <b>CafePOS</b> ikonkasi paydo bo'ladi — u Chrome'siz, alohida oynada ochiladi</li>
+      <li>Telefonda ushbu havolani oching va <b>CafePOS.apk</b> ni yuklab oling:<br>
+        <a href="${APK_URL}" target="_blank" rel="noopener">⬇️ CafePOS ilovasini yuklab olish</a></li>
+      <li>Yuklangan faylni oching. Telefon "noma'lum manbadan o'rnatish"ga ruxsat so'rasa — <b>Ruxsat berish</b>
+        (Chrome yoki Fayllar ilovasi uchun), keyin <b>O'rnatish</b></li>
+      <li><b>CafePOS</b> ilovasini oching — u shu Wi-Fi'dagi CafePOS serverini o'zi topadi.
+        Topmasa, manzilni qo'lda yozing: <code class="copyable">${esc(location.host)}</code></li>
     </ol>`;
   const ios = `
     <h3>🍏 iPhone / iPad (Safari)</h3>

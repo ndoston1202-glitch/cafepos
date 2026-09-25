@@ -1,0 +1,44 @@
+name: Android APK
+
+on:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: APK yig'ish
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: bash android/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CafePOS-apk
+          path: android/build/CafePOS.apk
+
+      # Doimiy havola: https://github.com/<repo>/releases/download/android-latest/CafePOS.apk
+      - name: Release'ga joylash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view android-latest >/dev/null 2>&1; then
+            gh release create android-latest --title "CafePOS Android ilovasi" \
+              --notes "Telefon va planshetlar uchun CafePOS ilovasi. CafePOS.apk ni yuklab, o'rnating." \
+              --target "$GITHUB_SHA"
+          fi
+          gh release upload android-latest android/build/CafePOS.apk --clobber

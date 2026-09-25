@@ -71,10 +71,12 @@ Maslahat: kompyuterga routerda doimiy IP bering, shunda manzil o'zgarmaydi.
 
 CafePOS o'rnatiladigan veb-ilova (PWA): bosh ekranda o'z ikonkasi bilan, Chrome/Safari panelisiz ochiladi.
 
-**Android (Chrome)** — Wi-Fi manzil `http://` bo'lgani uchun bir martalik sozlama kerak:
-1. Chrome'da `chrome://flags` → **Insecure origins treated as secure**
-2. Maydonga CafePOS manzilini yozing (masalan `http://192.168.1.10:8000`) → **Enabled** → **Relaunch**
-3. CafePOS'ni oching → **⋮** → **Ilovani o'rnatish / Установить приложение**
+**Android** — CafePOS ilovasi (APK):
+1. Telefonda yuklab oling: https://github.com/ndoston1202-glitch/cafepos/releases/download/android-latest/CafePOS.apk
+2. Faylni oching → "noma'lum manbadan o'rnatish"ga ruxsat bering → **O'rnatish**
+3. Ilova shu Wi-Fi'dagi CafePOS serverini o'zi topadi (yoki manzilni qo'lda yozing)
+
+Ilova kodi: `android/` papkasida; GitHub Actions uni har o'zgarishda yig'ib, yuqoridagi havolaga joylaydi.
 
 **iPhone (Safari)**: CafePOS'ni oching → **Ulashish** → **Add to Home Screen / На экран «Домой»**
 
