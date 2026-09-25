@@ -142,15 +142,41 @@ function formData(form) {
 
 function renderLogin() {
   $("#app").innerHTML = `
-    <div class="login-wrap">
-      <form class="login-box" id="login-form">
-        <div class="login-logo"><img src="/img/logo.png" alt="CafePOS — ERP dasturi"></div>
-        <label><span>Login</span><input name="username" autocomplete="username" required></label>
-        <label><span>Parol</span><input name="password" type="password" autocomplete="current-password" required></label>
+    <div class="auth">
+      <div class="auth-glow"></div>
+      <section class="auth-hero">
+        <img class="auth-hero-logo" src="/img/logo.png" alt="CafePos — ERP dasturi">
+        <h1>Kafengiz nazorat ostida<br><span>doim va hamma joyda</span></h1>
+        <p>Stollar, buyurtmalar, oshxona va kassani yagona tizimda boshqaring</p>
+      </section>
+      <form class="auth-card" id="login-form">
+        <div class="auth-card-brand">
+          <img src="/img/logo-icon.png" alt="">
+          <span>Cafe<b>Pos</b></span>
+        </div>
+        <h2>Kirish</h2>
+        <label><span>Foydalanuvchi nomi <em>*</em></span>
+          <input name="username" autocomplete="username" autocapitalize="off" required></label>
+        <label><span>Parol <em>*</em></span>
+          <div class="password-field">
+            <input name="password" type="password" autocomplete="current-password" required>
+            <button type="button" class="eye" id="toggle-password" aria-label="Parolni ko'rsatish">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </label>
         <div class="error" id="login-error"></div>
-        <button class="btn primary big">Kirish</button>
+        <button class="auth-submit">Kirish</button>
+        <div class="auth-divider"><span>CafePos · ERP dasturi</span></div>
+        <p class="auth-note">Login va parolni administratoringizdan oling</p>
       </form>
     </div>`;
+  $("#toggle-password").addEventListener("click", () => {
+    const input = $("input[name=password]");
+    input.type = input.type === "password" ? "text" : "password";
+    $("#toggle-password").classList.toggle("on", input.type === "text");
+  });
   $("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     try {

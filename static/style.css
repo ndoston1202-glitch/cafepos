@@ -58,24 +58,90 @@ label { display: block; margin-bottom: 12px; }
 label span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
 
 /* --- login */
-.login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
-.login-box {
-  background: var(--panel);
-  padding: 32px;
-  border-radius: var(--radius);
+.auth {
+  position: relative;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr minmax(320px, 400px);
+  align-items: center;
+  gap: 48px;
+  padding: 48px 7vw;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(208, 138, 76, .12), transparent 45%),
+    radial-gradient(circle at 85% 90%, rgba(208, 138, 76, .08), transparent 40%),
+    linear-gradient(135deg, #1a1512 0%, #241c17 55%, #16110e 100%);
+  overflow: hidden;
+  color: #fff;
+}
+.auth-glow {
+  position: absolute; inset: 0;
+  background-image: radial-gradient(rgba(255, 255, 255, .05) 1px, transparent 1px);
+  background-size: 22px 22px;
+  mask-image: linear-gradient(90deg, #000, transparent 70%);
+  pointer-events: none;
+}
+.auth-hero { position: relative; max-width: 520px; }
+.auth-hero-logo { width: 190px; height: auto; margin-bottom: 26px; }
+.auth-hero h1 { font-size: clamp(28px, 3.2vw, 42px); line-height: 1.2; margin: 0 0 16px; font-weight: 800; }
+.auth-hero h1 span { color: #e3a063; }
+.auth-hero p { color: #b9aea4; font-size: 16px; margin: 0; }
+.auth-card {
+  position: relative;
+  background: #fbfaf8;
+  color: var(--text);
+  border-radius: 20px;
+  padding: 30px 30px 24px;
+  box-shadow: 0 30px 60px rgba(0, 0, 0, .35);
+}
+.auth-card-brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 700; margin-bottom: 14px; }
+.auth-card-brand img { width: 36px; height: 36px; border-radius: 9px; }
+.auth-card-brand b { color: #c07a3e; }
+.auth-card h2 { text-align: center; font-size: 26px; margin: 0 0 18px; }
+.auth-card label span { color: #5f5750; font-size: 13px; }
+.auth-card label em { color: var(--danger); font-style: normal; }
+.auth-card input {
+  background: #eef1f7;
+  border: 1px solid #e3e6ee;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.auth-card input:focus { background: #fff; outline: 2px solid #d08a4c; }
+.password-field { position: relative; }
+.password-field input { padding-right: 44px; }
+.eye {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 34px; height: 34px;
+  border: 0; background: transparent; color: var(--muted);
+  border-radius: 8px; cursor: pointer;
+  display: grid; place-items: center;
+}
+.eye svg { width: 18px; height: 18px; }
+.eye.on, .eye:hover { color: #c07a3e; }
+.auth-submit {
   width: 100%;
-  max-width: 360px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.08);
+  border: 0;
+  border-radius: 10px;
+  padding: 13px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  cursor: pointer;
+  background: linear-gradient(135deg, #d08a4c, #a8622c);
+  box-shadow: 0 10px 22px rgba(168, 98, 44, .35);
+  transition: transform .1s, box-shadow .2s;
 }
-.login-logo {
-  margin: -32px -32px 24px;
-  padding: 22px 0 18px;
-  background: radial-gradient(circle at 50% 40%, #2c2521, #1f1a17 70%);
-  border-radius: var(--radius) var(--radius) 0 0;
-  text-align: center;
+.auth-submit:hover { box-shadow: 0 12px 26px rgba(168, 98, 44, .45); }
+.auth-submit:active { transform: translateY(1px); }
+.auth-divider { display: flex; align-items: center; gap: 10px; margin: 20px 0 8px; color: #a39990; font-size: 12px; }
+.auth-divider::before, .auth-divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.auth-note { text-align: center; margin: 0; font-size: 13px; color: var(--muted); }
+@media (max-width: 860px) {
+  .auth { grid-template-columns: 1fr; gap: 28px; padding: 32px 16px; align-content: center; }
+  .auth-hero { text-align: center; margin: 0 auto; }
+  .auth-hero-logo { width: 130px; margin-bottom: 14px; }
+  .auth-hero p { display: none; }
+  .auth-card { width: 100%; max-width: 420px; margin: 0 auto; }
 }
-.login-logo img { width: 210px; max-width: 70%; height: auto; }
-.login-box { overflow: hidden; }
 .error { color: var(--danger); min-height: 20px; margin-bottom: 8px; }
 
 /* --- layout: chap yon panel */
