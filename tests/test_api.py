@@ -2,9 +2,12 @@
 
 import json
 import os
+import socket
+import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.cookiejar import CookieJar
 from urllib.error import HTTPError
@@ -178,10 +181,172 @@ class ApiTest(unittest.TestCase):
         status, _ = client.call("GET", "/api/tables")
         self.assertEqual(status, 401)
 
+    def new_order_with(self, *product_ids):
+        _, order = self.admin.call("POST", "/api/orders", {"type": "takeaway"})
+        for pid in product_ids:
+            _, order = self.admin.call("POST", f"/api/orders/{order['id']}/items", {"product_id": pid})
+        return order
+
+    def test_kitchen_print_by_product_printer(self):
+        # Soxta tarmoq printeri: kelgan baytlarni yig'adi
+        received = []
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+
+        def accept():
+            while True:
+                try:
+                    c, _ = listener.accept()
+                except OSError:
+                    return
+                with c:
+                    data = b""
+                    while chunk := c.recv(4096):
+                        data += chunk
+                    received.append(data)
+
+        threading.Thread(target=accept, daemon=True).start()
+        port = listener.getsockname()[1]
+        try:
+            _, kitchen = self.admin.call("POST", "/api/printers", {
+                "name": "Oshxona", "kind": "network", "address": "127.0.0.1", "port": port, "width": 80,
+            })
+            _, dead = self.admin.call("POST", "/api/printers", {
+                "name": "Bar", "kind": "network", "address": "127.0.0.1", "port": 1, "width": 58,
+            })
+            _, p_hot = self.admin.call("POST", "/api/products", {"name": "Manti", "price": 20000, "printer_id": kitchen["id"]})
+            _, p_bar = self.admin.call("POST", "/api/products", {"name": "Sharbat", "price": 9000, "printer_id": dead["id"]})
+            _, p_none = self.admin.call("POST", "/api/products", {"name": "Non", "price": 3000})
+
+            order = self.new_order_with(p_hot["id"], p_hot["id"], p_bar["id"], p_none["id"])
+            self.assertEqual(order["pending_print"], 3)  # printersiz "Non" hisoblanmaydi
+
+            # Bar printeri ishlamaydi - Oshxona chiqadi, Bar kutib turadi
+            status, res = self.admin.call("POST", f"/api/orders/{order['id']}/kitchen-print")
+            self.assertEqual(status, 200)
+            self.assertEqual(res["printed"], ["Oshxona"])
+            self.assertEqual(len(res["errors"]), 1)
+            self.assertEqual(res["pending_print"], 1)
+            for _ in range(50):
+                if received:
+                    break
+                time.sleep(0.05)
+            self.assertIn(b"2 x Manti", received[0])
+            self.assertNotIn(b"Sharbat", received[0])
+
+            # Mantini 1 taga kamaytiramiz - faqat "BEKOR" qatori chiqadi
+            manti = next(i for i in res["items"] if i["name"] == "Manti")
+            self.admin.call("PUT", f"/api/orders/{order['id']}/items/{manti['id']}", {"qty": 1})
+            self.admin.call("DELETE", f"/api/printers/{dead['id']}")
+            status, res = self.admin.call("POST", f"/api/orders/{order['id']}/kitchen-print")
+            self.assertEqual(status, 200)
+            for _ in range(50):
+                if len(received) > 1:
+                    break
+                time.sleep(0.05)
+            self.assertIn(b"BEKOR: 1 x Manti", received[1])
+            self.assertEqual(res["pending_print"], 0)
+
+            status, _ = self.admin.call("POST", f"/api/orders/{order['id']}/kitchen-print")
+            self.assertEqual(status, 400)  # yangi narsa yo'q
+        finally:
+            listener.close()
+
+    def test_kitchen_screen(self):
+        _, products = self.admin.call("GET", "/api/products")
+        order = self.new_order_with(products[0]["id"], products[0]["id"], products[1]["id"])
+        self.assertEqual(order["pending_kds"], 3)
+        status, res = self.waiter.call("POST", f"/api/orders/{order['id']}/kitchen-send")
+        self.assertEqual(status, 200)
+        self.assertEqual(res["pending_kds"], 0)
+
+        cook = Client(self.base)
+        self.admin.call("POST", "/api/users", {"username": "oshpaz", "full_name": "Oshpaz", "role": "cook", "password": "1234"})
+        cook.login("oshpaz", "1234")
+        _, tickets = cook.call("GET", "/api/kitchen")
+        mine = [t for t in tickets if t["order_id"] == order["id"]]
+        self.assertEqual(sum(l["qty"] for t in mine for l in t["lines"]), 3)
+
+        # Ofitsiant oshxona ekranini ko'ra olmaydi
+        status, _ = self.waiter.call("GET", "/api/kitchen")
+        self.assertEqual(status, 403)
+
+        # Taom olib tashlansa - oshxonaga BEKOR boradi
+        item = order["items"][1]
+        self.admin.call("PUT", f"/api/orders/{order['id']}/items/{item['id']}", {"qty": 0})
+        _, res = self.admin.call("POST", f"/api/orders/{order['id']}/kitchen-send")
+        self.assertEqual(res["items"][0]["qty"], 2)
+        _, tickets = cook.call("GET", "/api/kitchen")
+        lines = [l for t in tickets if t["order_id"] == order["id"] for l in t["lines"]]
+        self.assertIn({"name": item["name"], "qty": -1}, lines)
+
+        for t in tickets:
+            cook.call("POST", f"/api/kitchen/{t['id']}/ready")
+        _, tickets = cook.call("GET", "/api/kitchen")
+        self.assertEqual(tickets, [])
+
+    def test_halls(self):
+        _, halls = self.admin.call("GET", "/api/halls")
+        self.assertEqual([h["name"] for h in halls][:3], ["Asosiy zal", "Banket zali", "Kabinalar"])
+        _, tables = self.admin.call("GET", "/api/tables")
+        cabins = [t for t in tables if t["hall_name"] == "Kabinalar"]
+        self.assertEqual(len(cabins), 4)
+
+        _, order = self.waiter.call("POST", "/api/orders", {"type": "dine_in", "table_id": cabins[0]["id"]})
+        self.assertEqual((order["hall_name"], order["table_name"]), ("Kabinalar", "Kabina 1"))
+
+        _, hall = self.admin.call("POST", "/api/halls", {"name": "Terassa"})
+        _, table = self.admin.call("POST", "/api/tables", {"name": "T1", "seats": 2, "hall_id": hall["id"]})
+        status, _ = self.admin.call("DELETE", f"/api/halls/{hall['id']}")
+        self.assertEqual(status, 409)  # zalda stol bor
+        self.admin.call("DELETE", f"/api/tables/{table['id']}")
+        status, _ = self.admin.call("DELETE", f"/api/halls/{hall['id']}")
+        self.assertEqual(status, 200)
+        status, _ = self.admin.call("POST", "/api/tables", {"name": "X", "hall_id": 9999})
+        self.assertEqual(status, 404)
+        self.admin.call("POST", f"/api/orders/{order['id']}/cancel")
+
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})
         self.assertEqual(status, 400)
+
+
+class MigrationTest(unittest.TestCase):
+    def test_old_database_is_upgraded(self):
+        import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "old.db")
+            # Birinchi versiyadagi baza (zallar, printerlar yo'q)
+            conn = sqlite3.connect(path)
+            conn.executescript("""
+                CREATE TABLE tables (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                    seats INTEGER NOT NULL DEFAULT 4, active INTEGER NOT NULL DEFAULT 1);
+                CREATE TABLE products (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER,
+                    name TEXT NOT NULL, price INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+                CREATE TABLE order_items (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL,
+                    product_id INTEGER, name TEXT NOT NULL, price INTEGER NOT NULL, qty INTEGER NOT NULL);
+                INSERT INTO tables (name) VALUES ('Stol 1'), ('Stol 2');
+                INSERT INTO products (name, price) VALUES ('Choy', 5000);
+            """)
+            conn.close()
+
+            old_path, server.DB_PATH = server.DB_PATH, path
+            try:
+                conn = server.connect()
+                server.init_db(conn)
+                server.init_db(conn)  # ikkinchi marta ham xatosiz
+                names = {r["name"]: r["hall_id"] for r in conn.execute("SELECT * FROM tables")}
+                main = conn.execute("SELECT id FROM halls WHERE name = 'Asosiy zal'").fetchone()[0]
+                self.assertEqual(names["Stol 1"], main)
+                self.assertIn("Kabina 1", names)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM halls").fetchone()[0], 3)
+                self.assertEqual(conn.execute("SELECT name FROM products").fetchone()[0], "Choy")
+                conn.close()
+            finally:
+                server.DB_PATH = old_path
 
 
 if __name__ == "__main__":

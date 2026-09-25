@@ -81,10 +81,12 @@ label span { display: block; font-size: 13px; color: var(--muted); margin-bottom
   border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
 }
-.topbar .brand { font-weight: 700; font-size: 18px; margin-right: 12px; }
-.topbar nav { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
+.topbar .brand { font-weight: 700; font-size: 18px; margin-right: 8px; }
+.topbar nav { display: flex; gap: 2px; flex-wrap: wrap; flex: 1; }
 .topbar nav a {
-  padding: 8px 14px;
+  padding: 7px 10px;
+  font-size: 14px;
+  white-space: nowrap;
   border-radius: 8px;
   text-decoration: none;
   color: var(--text);
@@ -168,6 +170,54 @@ main { padding: 16px; max-width: 1400px; margin: 0 auto; }
 .totals .grand { font-size: 20px; font-weight: 700; border-top: 1px solid var(--line); padding-top: 8px; }
 .cart-actions { display: grid; gap: 8px; margin-top: 12px; }
 .cart-actions .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+.kitchen-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.btn.kitchen { background: #2f4858; border-color: #2f4858; color: #fff; padding: 12px 8px; font-weight: 600; }
+.btn.kitchen:hover:not(:disabled) { background: #1f3340; }
+.btn .count {
+  display: inline-block;
+  min-width: 22px;
+  padding: 1px 6px;
+  border-radius: 20px;
+  background: #f0a24a;
+  color: #000;
+  font-size: 12px;
+  margin-left: 4px;
+}
+
+/* --- zallar */
+.hall-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+.hall-tabs .btn { display: flex; gap: 6px; align-items: center; }
+.hall-tabs .btn small { opacity: .75; }
+.hall-section { margin-bottom: 24px; }
+.hall-section h3 { display: flex; align-items: center; gap: 8px; }
+.hall-section h3 .muted { font-size: 14px; font-weight: 400; }
+
+/* --- oshxona ekrani */
+.kitchen-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.ticket {
+  background: var(--panel);
+  border: 2px solid var(--line);
+  border-top: 6px solid #2f4858;
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ticket.late { border-top-color: var(--danger); }
+.ticket-head { display: flex; justify-content: space-between; gap: 8px; font-size: 17px; }
+.ticket-head span { white-space: nowrap; color: var(--muted); }
+.ticket ul { list-style: none; padding: 0; margin: 6px 0; font-size: 18px; flex: 1; }
+.ticket li { padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.ticket li.cancel { color: var(--danger); }
 
 /* --- jadval */
 table.list { width: 100%; border-collapse: collapse; }

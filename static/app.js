@@ -3,9 +3,9 @@
 
 const state = { user: null, categories: [], products: [] };
 
-const ROLE_NAMES = { admin: "Administrator", cashier: "Kassir", waiter: "Ofitsiant" };
+const ROLE_NAMES = { admin: "Administrator", cashier: "Kassir", waiter: "Ofitsiant", cook: "Oshpaz" };
+const PRINTER_KINDS = { network: "Tarmoq (IP manzil)", windows: "Windows (ulashilgan USB printer)" };
 const METHOD_NAMES = { cash: "Naqd", card: "Karta", payme: "Payme", click: "Click" };
-const TYPE_NAMES = { dine_in: "Stol", takeaway: "Olib ketish" };
 
 // ------------------------------------------------------------ yordamchilar
 
@@ -35,6 +35,12 @@ function time(s) {
 function go(hash) {
   if (location.hash === hash) router();
   else location.hash = hash;
+}
+
+// "Asosiy zal · Stol 3" yoki "Olib ketish"
+function place(o) {
+  if (o.type === "takeaway") return "Olib ketish";
+  return [o.hall_name, o.table_name].filter(Boolean).join(" · ");
 }
 
 function can(...roles) {
@@ -135,14 +141,16 @@ async function logout() {
 // ------------------------------------------------------------ layout
 
 function navItems() {
+  if (can("cook")) return [["#/kitchen", "🍳 Oshxona"]];
   const items = [["#/tables", "🪑 Stollar"]];
-  if (can("admin", "cashier")) items.push(["#/cashier", "💰 Kassa"], ["#/reports", "📊 Hisobot"]);
-  if (can("admin")) items.push(["#/menu", "🍽️ Menyu"], ["#/tables-admin", "⚙️ Stollar sozlamasi"], ["#/users", "👥 Xodimlar"]);
+  if (can("admin", "cashier")) items.push(["#/cashier", "💰 Kassa"], ["#/kitchen", "🍳 Oshxona"], ["#/reports", "📊 Hisobot"]);
+  if (can("admin")) items.push(
+    ["#/menu", "🍽️ Menyu"], ["#/tables-admin", "⚙️ Zallar va stollar"], ["#/printers", "🖨️ Printerlar"], ["#/users", "👥 Xodimlar"]);
   return items;
 }
 
 function defaultRoute() {
-  return "#/tables";
+  return can("cook") ? "#/kitchen" : "#/tables";
 }
 
 function layout(content) {
@@ -151,7 +159,7 @@ function layout(content) {
     <header class="topbar">
       <div class="brand">☕ CafePOS</div>
       <nav>${navItems().map(([href, name]) =>
-        `<a href="${href}" class="${hash.startsWith(href) ? "active" : ""}">${name}</a>`).join("")}</nav>
+        `<a href="${href}" class="${hash === href || (href === "#/tables" && hash.startsWith("#/order/")) ? "active" : ""}">${name}</a>`).join("")}</nav>
       <div class="user">
         <span>${esc(state.user.full_name)} <span class="muted">· ${ROLE_NAMES[state.user.role]}</span></span>
         <button class="btn small" id="logout-btn">Chiqish</button>
@@ -172,33 +180,63 @@ async function loadMenu() {
 // ------------------------------------------------------------ stollar
 
 async function viewTables() {
-  const tables = await api("GET", "/api/tables");
+  const [halls, tables] = await Promise.all([api("GET", "/api/halls"), api("GET", "/api/tables")]);
+  let hall = "all";
+  try { hall = localStorage.getItem("hall") || "all"; } catch { /* ruxsat yo'q */ }
+  if (hall !== "all" && !halls.some((h) => String(h.id) === hall)) hall = "all";
+
+  // Zalsiz stollar ham ko'rinsin
+  const groups = halls.map((h) => ({ id: String(h.id), name: h.name, tables: tables.filter((t) => t.hall_id === h.id) }));
+  const orphan = tables.filter((t) => !t.hall_id);
+  if (orphan.length) groups.push({ id: "none", name: "Zalsiz", tables: orphan });
+
+  const card = (t) => {
+    const o = t.order;
+    return `
+      <div class="table-card ${o ? "busy" : ""}" data-id="${t.id}">
+        <div class="name">${esc(t.name)}</div>
+        <div class="muted">${o ? `Band · ${time(o.created_at)} · ${esc(o.waiter_name || "")}` : `Bo'sh · ${t.seats} o'rin`}</div>
+        ${o ? `<div class="sum">${money(Math.max(o.subtotal - o.discount, 0))}</div>` : ""}
+      </div>`;
+  };
+  const busyCount = (list) => list.filter((t) => t.order).length;
+
   const view = layout(`
     <div class="toolbar">
       <h2>Stollar</h2>
       <button class="btn primary" id="takeaway-btn">🥡 Olib ketish buyurtmasi</button>
     </div>
-    <div class="tables-grid">
-      ${tables.map((t) => {
-        const o = t.order;
-        return `
-          <div class="table-card ${o ? "busy" : ""}" data-id="${t.id}">
-            <div class="name">${esc(t.name)}</div>
-            <div class="muted">${o ? `Band · ${time(o.created_at)} · ${esc(o.waiter_name || "")}` : `Bo'sh · ${t.seats} o'rin`}</div>
-            ${o ? `<div class="sum">${money(Math.max(o.subtotal - o.discount, 0))}</div>` : ""}
-          </div>`;
-      }).join("") || `<p class="muted">Stollar yo'q. Administrator "Stollar sozlamasi" bo'limida qo'shadi.</p>`}
-    </div>`);
+    <div class="hall-tabs">
+      <button class="btn" data-hall="all">Hammasi <small>${busyCount(tables)}/${tables.length}</small></button>
+      ${groups.map((g) => `<button class="btn" data-hall="${g.id}">${esc(g.name)} <small>${busyCount(g.tables)}/${g.tables.length}</small></button>`).join("")}
+    </div>
+    <div id="halls"></div>`);
 
-  $$(".table-card", view).forEach((card) =>
-    card.addEventListener("click", safe(async () => {
-      const order = await api("POST", "/api/orders", { type: "dine_in", table_id: +card.dataset.id });
-      location.hash = "#/order/" + order.id;
-    })));
+  function render() {
+    $$("[data-hall]", view).forEach((b) => b.classList.toggle("active", b.dataset.hall === hall));
+    const shown = hall === "all" ? groups : groups.filter((g) => g.id === hall);
+    $("#halls", view).innerHTML = shown.map((g) => `
+      <section class="hall-section">
+        <h3>${esc(g.name)} <span class="muted">· band ${busyCount(g.tables)} / ${g.tables.length}</span></h3>
+        <div class="tables-grid">${g.tables.map(card).join("") || `<p class="muted">Bu zalda stol yo'q</p>`}</div>
+      </section>`).join("") || `<p class="muted">Stollar yo'q. Administrator "⚙️ Zallar va stollar" bo'limida qo'shadi.</p>`;
+    $$(".table-card", view).forEach((c) =>
+      c.addEventListener("click", safe(async () => {
+        const order = await api("POST", "/api/orders", { type: "dine_in", table_id: +c.dataset.id });
+        location.hash = "#/order/" + order.id;
+      })));
+  }
+
+  $$("[data-hall]", view).forEach((b) => b.addEventListener("click", () => {
+    hall = b.dataset.hall;
+    try { localStorage.setItem("hall", hall); } catch { /* ruxsat yo'q */ }
+    render();
+  }));
   $("#takeaway-btn").addEventListener("click", safe(async () => {
     const order = await api("POST", "/api/orders", { type: "takeaway" });
     location.hash = "#/order/" + order.id;
   }));
+  render();
 }
 
 // ------------------------------------------------------------ buyurtma
@@ -208,7 +246,7 @@ async function viewOrder(id) {
   let order = await api("GET", "/api/orders/" + id);
   let activeCat = "all";
 
-  const title = () => order.type === "takeaway" ? `🥡 Olib ketish #${order.id}` : `🪑 ${esc(order.table_name)} · #${order.id}`;
+  const title = () => `${order.type === "takeaway" ? "🥡" : "🪑"} ${esc(place(order))} · #${order.id}`;
   const view = layout(`
     <div class="toolbar">
       <button class="btn" id="back-btn">← Orqaga</button>
@@ -277,6 +315,15 @@ async function viewOrder(id) {
           <button class="btn" id="print-btn" ${order.items.length ? "" : "disabled"}>🖨️ Chek</button>
           ${open && can("admin", "cashier") ? `<button class="btn danger" id="cancel-btn">Bekor qilish</button>` : ""}
         </div>
+        ${open ? `
+        <div class="kitchen-actions">
+          <button class="btn kitchen" id="kitchen-print-btn" ${order.pending_print ? "" : "disabled"}>
+            🖨️ Oshxona printeriga${order.pending_print ? ` <span class="count">${order.pending_print}</span>` : ""}
+          </button>
+          <button class="btn kitchen" id="kitchen-send-btn" ${order.pending_kds ? "" : "disabled"}>
+            🖥️ Oshxona kompyuteriga${order.pending_kds ? ` <span class="count">${order.pending_kds}</span>` : ""}
+          </button>
+        </div>` : ""}
       </div>`;
 
     $$("#cart [data-item]").forEach((b) => b.addEventListener("click", safe(async () => {
@@ -289,6 +336,27 @@ async function viewOrder(id) {
       order = paid;
       renderCart();
       renderProducts();
+    }));
+    const kitchenPrintBtn = $("#kitchen-print-btn");
+    if (kitchenPrintBtn) kitchenPrintBtn.addEventListener("click", safe(async () => {
+      kitchenPrintBtn.disabled = true;
+      try {
+        order = await api("POST", `/api/orders/${order.id}/kitchen-print`);
+        toast("Chiqarildi: " + order.printed.join(", "));
+        if (order.errors.length) setTimeout(() => toast(order.errors.join("; "), true), 2600);
+      } finally {
+        renderCart();
+      }
+    }));
+    const kitchenSendBtn = $("#kitchen-send-btn");
+    if (kitchenSendBtn) kitchenSendBtn.addEventListener("click", safe(async () => {
+      kitchenSendBtn.disabled = true;
+      try {
+        order = await api("POST", `/api/orders/${order.id}/kitchen-send`);
+        toast("Oshxona ekraniga yuborildi ✅");
+      } finally {
+        renderCart();
+      }
     }));
     const cancelBtn = $("#cancel-btn");
     if (cancelBtn) cancelBtn.addEventListener("click", safe(async () => {
@@ -353,7 +421,7 @@ function payModal(order, onPaid) {
 function printReceipt(order) {
   $("#print-area").innerHTML = `
     <h3>☕ CafePOS</h3>
-    <div class="c">Buyurtma #${order.id} · ${order.type === "takeaway" ? "Olib ketish" : esc(order.table_name)}</div>
+    <div class="c">Buyurtma #${order.id} · ${esc(place(order))}</div>
     <div class="c">${esc(order.closed_at || order.created_at)}</div>
     <div class="c">Ofitsiant: ${esc(order.waiter_name || "-")}</div>
     <hr>
@@ -382,17 +450,16 @@ async function viewCashier() {
     <div class="toolbar"><h2>Kassa · ochiq buyurtmalar</h2></div>
     <div class="panel">
       <table class="list">
-        <thead><tr><th>#</th><th>Turi</th><th>Stol</th><th>Ofitsiant</th><th>Vaqt</th><th class="right">Summa</th></tr></thead>
+        <thead><tr><th>#</th><th>Joy</th><th>Ofitsiant</th><th>Vaqt</th><th class="right">Summa</th></tr></thead>
         <tbody>
           ${orders.map((o) => `
             <tr class="clickable" data-id="${o.id}">
               <td>${o.id}</td>
-              <td>${TYPE_NAMES[o.type]}</td>
-              <td>${esc(o.table_name || "-")}</td>
+              <td>${esc(place(o))}</td>
               <td>${esc(o.waiter_name || "-")}</td>
               <td>${time(o.created_at)}</td>
               <td class="right"><b>${money(Math.max(o.subtotal - o.discount, 0))}</b></td>
-            </tr>`).join("") || `<tr><td colspan="6" class="muted">Ochiq buyurtmalar yo'q</td></tr>`}
+            </tr>`).join("") || `<tr><td colspan="5" class="muted">Ochiq buyurtmalar yo'q</td></tr>`}
         </tbody>
       </table>
     </div>`);
@@ -445,14 +512,14 @@ async function viewReports() {
     </div>
     <div class="panel"><h3>Yopilgan buyurtmalar</h3>
       <table class="list">
-        <thead><tr><th>#</th><th>Vaqt</th><th>Turi</th><th>Stol</th><th>Ofitsiant</th><th>To'lov</th><th class="right">Summa</th></tr></thead>
+        <thead><tr><th>#</th><th>Vaqt</th><th>Joy</th><th>Ofitsiant</th><th>To'lov</th><th class="right">Summa</th></tr></thead>
         <tbody>
           ${r.orders.map((o) => `
             <tr class="clickable" data-id="${o.id}">
-              <td>${o.id}</td><td>${esc(o.closed_at)}</td><td>${TYPE_NAMES[o.type]}</td>
-              <td>${esc(o.table_name || "-")}</td><td>${esc(o.waiter_name || "-")}</td>
+              <td>${o.id}</td><td>${esc(o.closed_at)}</td><td>${esc(place(o))}</td>
+              <td>${esc(o.waiter_name || "-")}</td>
               <td>${METHOD_NAMES[o.payment_method] || ""}</td><td class="right">${money(o.total)}</td>
-            </tr>`).join("") || `<tr><td colspan="7" class="muted">Bu davrda buyurtma yo'q</td></tr>`}
+            </tr>`).join("") || `<tr><td colspan="6" class="muted">Bu davrda buyurtma yo'q</td></tr>`}
         </tbody>
       </table>
     </div>`);
@@ -467,6 +534,7 @@ async function viewReports() {
 
 async function viewMenu() {
   await loadMenu();
+  const printers = await api("GET", "/api/printers");
   const catName = (id) => (state.categories.find((c) => c.id === id) || {}).name || "—";
   layout(`
     <div class="two-col">
@@ -484,15 +552,16 @@ async function viewMenu() {
       <div class="panel">
         <div class="toolbar"><h2>Taomlar</h2><button class="btn primary small" id="add-prod">+ Taom qo'shish</button></div>
         <table class="list">
-          <thead><tr><th>Nomi</th><th>Kategoriya</th><th class="right">Narxi</th><th></th></tr></thead>
+          <thead><tr><th>Nomi</th><th>Kategoriya</th><th>Printer</th><th class="right">Narxi</th><th></th></tr></thead>
           <tbody>
             ${state.products.map((p) => `
               <tr><td>${esc(p.name)}</td><td>${esc(catName(p.category_id))}</td>
+                <td>${p.printer_name ? `🖨️ ${esc(p.printer_name)}` : `<span class="muted">—</span>`}</td>
                 <td class="right">${money(p.price)}</td>
                 <td class="right">
                   <button class="btn small" data-edit-prod="${p.id}">✏️</button>
                   <button class="btn small danger" data-del-prod="${p.id}">🗑</button>
-                </td></tr>`).join("") || `<tr><td colspan="4" class="muted">Taom yo'q</td></tr>`}
+                </td></tr>`).join("") || `<tr><td colspan="5" class="muted">Taom yo'q</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -520,6 +589,13 @@ async function viewMenu() {
           <option value="">— Kategoriyasiz —</option>
           ${state.categories.map((c) => `<option value="${c.id}" ${c.id === p.category_id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
         </select></label>
+      <label><span>Oshxona printeri (bu taom qaysi printerdan chiqadi)</span>
+        <select name="printer_id">
+          <option value="">— Printersiz —</option>
+          ${printers.map((pr) => `<option value="${pr.id}" ${pr.id === p.printer_id ? "selected" : ""}>${esc(pr.name)}</option>`).join("")}
+        </select>
+        ${printers.length ? "" : `<small class="muted">Printerlar hali qo'shilmagan — "🖨️ Printerlar" bo'limida qo'shing</small>`}
+      </label>
       <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
     </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
     e.preventDefault();
@@ -550,38 +626,83 @@ async function viewMenu() {
 // ------------------------------------------------------------ stollar sozlamasi (admin)
 
 async function viewTablesAdmin() {
-  const tables = await api("GET", "/api/tables");
+  const [halls, tables] = await Promise.all([api("GET", "/api/halls"), api("GET", "/api/tables")]);
+  const hallName = (id) => (halls.find((h) => h.id === id) || {}).name || "—";
   layout(`
-    <div class="panel" style="max-width:700px">
-      <div class="toolbar"><h2>Stollar sozlamasi</h2><button class="btn primary small" id="add">+ Stol qo'shish</button></div>
-      <table class="list">
-        <thead><tr><th>Nomi</th><th>O'rinlar</th><th>Holati</th><th></th></tr></thead>
-        <tbody>
-          ${tables.map((t) => `
-            <tr><td>${esc(t.name)}</td><td>${t.seats}</td>
-              <td>${t.order ? `<span class="badge">Band</span>` : `<span class="badge">Bo'sh</span>`}</td>
-              <td class="right">
-                <button class="btn small" data-edit="${t.id}">✏️</button>
-                <button class="btn small danger" data-del="${t.id}">🗑</button>
-              </td></tr>`).join("") || `<tr><td colspan="4" class="muted">Stol yo'q</td></tr>`}
-        </tbody>
-      </table>
+    <div class="two-col">
+      <div class="panel">
+        <div class="toolbar"><h2>Zallar</h2><button class="btn primary small" id="add-hall">+ Zal qo'shish</button></div>
+        <p class="muted">Masalan: Asosiy zal, Banket zali, Kabinalar, Yozgi terassa</p>
+        <table class="list">
+          ${halls.map((h) => `
+            <tr><td><b>${esc(h.name)}</b><div class="muted">${h.tables} ta stol</div></td>
+              <td class="right" style="white-space:nowrap">
+                <button class="btn small" data-edit-hall="${h.id}">✏️</button>
+                <button class="btn small danger" data-del-hall="${h.id}">🗑</button>
+              </td></tr>`).join("") || `<tr><td class="muted">Zal yo'q</td></tr>`}
+        </table>
+      </div>
+      <div class="panel">
+        <div class="toolbar"><h2>Stollar va kabinalar</h2><button class="btn primary small" id="add">+ Stol qo'shish</button></div>
+        <table class="list">
+          <thead><tr><th>Nomi</th><th>Zal</th><th>O'rinlar</th><th>Holati</th><th></th></tr></thead>
+          <tbody>
+            ${tables.map((t) => `
+              <tr><td>${esc(t.name)}</td><td>${esc(hallName(t.hall_id))}</td><td>${t.seats}</td>
+                <td><span class="badge">${t.order ? "Band" : "Bo'sh"}</span></td>
+                <td class="right" style="white-space:nowrap">
+                  <button class="btn small" data-edit="${t.id}">✏️</button>
+                  <button class="btn small danger" data-del="${t.id}">🗑</button>
+                </td></tr>`).join("") || `<tr><td colspan="5" class="muted">Stol yo'q</td></tr>`}
+          </tbody>
+        </table>
+      </div>
     </div>`);
 
-  const form = (t = {}) => openModal(`
-    <form id="f"><h2>${t.id ? "Stolni tahrirlash" : "Yangi stol"}</h2>
-      <label><span>Nomi</span><input name="name" value="${esc(t.name || `Stol ${tables.length + 1}`)}" required></label>
-      <label><span>O'rinlar soni</span><input name="seats" type="number" min="1" value="${t.seats ?? 4}"></label>
+  const hallForm = (h = {}) => openModal(`
+    <form id="f"><h2>${h.id ? "Zalni tahrirlash" : "Yangi zal"}</h2>
+      <label><span>Nomi</span><input name="name" value="${esc(h.name || "")}" placeholder="Banket zali" required></label>
+      <label><span>Tartib raqami</span><input name="sort" type="number" value="${h.sort ?? halls.length}"></label>
       <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
     </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
     e.preventDefault();
-    await api(t.id ? "PUT" : "POST", "/api/tables" + (t.id ? "/" + t.id : ""), formData(e.target));
+    await api(h.id ? "PUT" : "POST", "/api/halls" + (h.id ? "/" + h.id : ""), formData(e.target));
     closeModal();
     toast("Saqlandi");
     viewTablesAdmin();
   })));
 
+  const form = (t = {}) => {
+    const hallId = t.hall_id ?? (halls[0] || {}).id;
+    const inHall = tables.filter((x) => x.hall_id === hallId).length;
+    openModal(`
+      <form id="f"><h2>${t.id ? "Stolni tahrirlash" : "Yangi stol"}</h2>
+        <label><span>Zal</span>
+          <select name="hall_id">
+            <option value="">— Zalsiz —</option>
+            ${halls.map((h) => `<option value="${h.id}" ${h.id === hallId ? "selected" : ""}>${esc(h.name)}</option>`).join("")}
+          </select></label>
+        <label><span>Nomi (masalan: Stol 5, Kabina 2)</span><input name="name" value="${esc(t.name || `Stol ${inHall + 1}`)}" required></label>
+        <label><span>O'rinlar soni</span><input name="seats" type="number" min="1" value="${t.seats ?? 4}"></label>
+        <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
+      </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
+      e.preventDefault();
+      await api(t.id ? "PUT" : "POST", "/api/tables" + (t.id ? "/" + t.id : ""), formData(e.target));
+      closeModal();
+      toast("Saqlandi");
+      viewTablesAdmin();
+    })));
+  };
+
+  $("#add-hall").addEventListener("click", () => hallForm());
   $("#add").addEventListener("click", () => form());
+  $$("[data-edit-hall]").forEach((b) => b.addEventListener("click", () =>
+    hallForm(halls.find((h) => h.id === +b.dataset.editHall))));
+  $$("[data-del-hall]").forEach((b) => b.addEventListener("click", safe(async () => {
+    if (!confirm("Zalni o'chirasizmi?")) return;
+    await api("DELETE", "/api/halls/" + b.dataset.delHall);
+    viewTablesAdmin();
+  })));
   $$("[data-edit]").forEach((b) => b.addEventListener("click", () =>
     form(tables.find((t) => t.id === +b.dataset.edit))));
   $$("[data-del]").forEach((b) => b.addEventListener("click", safe(async () => {
@@ -635,11 +756,183 @@ async function viewUsers() {
     form(users.find((u) => u.id === +b.dataset.edit))));
 }
 
+// ------------------------------------------------------------ printerlar (admin)
+
+async function viewPrinters() {
+  const printers = await api("GET", "/api/printers");
+  const where = (p) => p.kind === "network" ? `${esc(p.address)}:${p.port}` : esc(p.address);
+  layout(`
+    <div class="panel" style="max-width:900px">
+      <div class="toolbar"><h2>Oshxona printerlari</h2><button class="btn primary small" id="add">+ Printer qo'shish</button></div>
+      <p class="muted">Har bir taomga Menyu bo'limida printer biriktiriladi. Buyurtmada "🖨️ Oshxona printeriga"
+        bosilganda har bir taom o'z printeridan chiqadi.</p>
+      <table class="list">
+        <thead><tr><th>Nomi</th><th>Ulanish</th><th>Manzil</th><th>Qog'oz</th><th></th></tr></thead>
+        <tbody>
+          ${printers.map((p) => `
+            <tr><td><b>${esc(p.name)}</b></td><td>${PRINTER_KINDS[p.kind]}</td><td>${where(p)}</td><td>${p.width} mm</td>
+              <td class="right" style="white-space:nowrap">
+                <button class="btn small" data-test="${p.id}">🧪 Sinov</button>
+                <button class="btn small" data-edit="${p.id}">✏️</button>
+                <button class="btn small danger" data-del="${p.id}">🗑</button>
+              </td></tr>`).join("") || `<tr><td colspan="5" class="muted">Printer yo'q</td></tr>`}
+        </tbody>
+      </table>
+    </div>`);
+
+  const form = (p = { kind: "network", port: 9100, width: 80 }) => openModal(`
+    <form id="f"><h2>${p.id ? "Printerni tahrirlash" : "Yangi printer"}</h2>
+      <label><span>Nomi (masalan: Oshxona, Salat, Bar)</span><input name="name" value="${esc(p.name || "")}" required></label>
+      <label><span>Ulanish turi</span>
+        <select name="kind">${Object.entries(PRINTER_KINDS).map(([k, v]) =>
+          `<option value="${k}" ${k === p.kind ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+      <label><span id="addr-label"></span><input name="address" value="${esc(p.address || "")}" required></label>
+      <label id="port-box"><span>Port</span><input name="port" type="number" value="${p.port}"></label>
+      <label><span>Qog'oz kengligi</span>
+        <select name="width">
+          <option value="80" ${p.width >= 80 ? "selected" : ""}>80 mm</option>
+          <option value="58" ${p.width < 80 ? "selected" : ""}>58 mm</option>
+        </select></label>
+      <p class="muted" id="kind-help"></p>
+      <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
+    </form>`, (m) => {
+    const kind = $("select[name=kind]", m);
+    const sync = () => {
+      const net = kind.value === "network";
+      $("#addr-label", m).textContent = net ? "Printer IP manzili (masalan: 192.168.1.100)" : "Ulashilgan printer nomi (Share name)";
+      $("input[name=address]", m).placeholder = net ? "192.168.1.100" : "XP80";
+      $("#port-box", m).classList.toggle("hidden", !net);
+      $("#kind-help", m).textContent = net
+        ? "LAN (Ethernet/Wi-Fi) termoprinter. IP manzil printerning o'z-o'zini sinov chekida yozilgan bo'ladi. Port odatda 9100."
+        : "USB printer: Windows'da Boshqaruv paneli → Qurilmalar va printerlar → printer xususiyatlari → Kirish (Sharing) → " +
+          "\"Bu printerni ulashish\" ni belgilang va qisqa nom bering (masalan XP80). Shu nomni bu yerga yozing.";
+    };
+    kind.addEventListener("change", sync);
+    sync();
+    $("#f", m).addEventListener("submit", safe(async (e) => {
+      e.preventDefault();
+      await api(p.id ? "PUT" : "POST", "/api/printers" + (p.id ? "/" + p.id : ""), formData(e.target));
+      closeModal();
+      toast("Saqlandi");
+      viewPrinters();
+    }));
+  });
+
+  $("#add").addEventListener("click", () => form());
+  $$("[data-edit]").forEach((b) => b.addEventListener("click", () =>
+    form(printers.find((p) => p.id === +b.dataset.edit))));
+  $$("[data-test]").forEach((b) => b.addEventListener("click", safe(async () => {
+    b.disabled = true;
+    try {
+      await api("POST", `/api/printers/${b.dataset.test}/test`);
+      toast("Sinov cheki yuborildi ✅");
+    } finally {
+      b.disabled = false;
+    }
+  })));
+  $$("[data-del]").forEach((b) => b.addEventListener("click", safe(async () => {
+    if (!confirm("Printerni o'chirasizmi? Unga biriktirilgan taomlar printersiz qoladi.")) return;
+    await api("DELETE", "/api/printers/" + b.dataset.del);
+    viewPrinters();
+  })));
+}
+
+// ------------------------------------------------------------ oshxona ekrani
+
+let kitchenTimer = null;
+
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    osc.frequency.value = 880;
+    osc.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.25);
+  } catch { /* ovoz ishlamasa ham ekran ishlayveradi */ }
+}
+
+function minutesAgo(s) {
+  const t = new Date(s.replace(" ", "T"));
+  return Math.max(0, Math.floor((Date.now() - t) / 60000));
+}
+
+async function viewKitchen() {
+  const printers = await api("GET", "/api/printers");
+  let station = "";
+  try { station = localStorage.getItem("kitchen-station") || ""; } catch { /* ruxsat yo'q */ }
+  let known = null;
+
+  const view = layout(`
+    <div class="toolbar">
+      <h2>🍳 Oshxona</h2>
+      <select id="station" style="width:auto">
+        <option value="">Barcha bo'limlar</option>
+        ${printers.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}
+        <option value="none">Printersiz taomlar</option>
+      </select>
+    </div>
+    <div class="kitchen-grid" id="tickets"></div>`);
+  const select = $("#station", view);
+  select.value = station;
+  if (select.value !== station) station = "";
+  select.addEventListener("change", () => {
+    station = select.value;
+    try { localStorage.setItem("kitchen-station", station); } catch { /* ruxsat yo'q */ }
+    known = null;
+    refresh();
+  });
+
+  async function refresh() {
+    if (!location.hash.startsWith("#/kitchen") || !document.body.contains(view)) return stop();
+    let tickets;
+    try {
+      tickets = await api("GET", "/api/kitchen" + (station ? "?printer_id=" + station : ""));
+    } catch {
+      return;
+    }
+    if (!document.body.contains(view)) return;
+    if (known && tickets.some((t) => !known.has(t.id))) beep();
+    known = new Set(tickets.map((t) => t.id));
+    $("#tickets", view).innerHTML = tickets.map((t) => {
+      const mins = minutesAgo(t.created_at);
+      return `
+        <div class="ticket ${mins >= 15 ? "late" : ""}">
+          <div class="ticket-head">
+            <b>${t.type === "takeaway" ? "🥡" : "🪑"} ${esc(place(t))} · #${t.order_id}</b>
+            <span>${mins} daq</span>
+          </div>
+          <div class="muted">${esc(t.waiter_name || "")}${t.printer_name ? " · " + esc(t.printer_name) : ""}</div>
+          <ul>${t.lines.map((l) => l.qty > 0
+            ? `<li><b>${l.qty} ×</b> ${esc(l.name)}</li>`
+            : `<li class="cancel"><b>BEKOR ${-l.qty} ×</b> ${esc(l.name)}</li>`).join("")}</ul>
+          <button class="btn primary big" data-ready="${t.id}">✅ Tayyor</button>
+        </div>`;
+    }).join("") || `<p class="muted">Hozircha yangi buyurtma yo'q</p>`;
+    $$("[data-ready]", view).forEach((b) => b.addEventListener("click", safe(async () => {
+      b.disabled = true;
+      await api("POST", `/api/kitchen/${b.dataset.ready}/ready`);
+      refresh();
+    })));
+  }
+
+  function stop() {
+    clearInterval(kitchenTimer);
+    kitchenTimer = null;
+  }
+
+  stop();
+  kitchenTimer = setInterval(refresh, 5000);
+  refresh();
+}
+
 // ------------------------------------------------------------ router
 
 const routes = [
-  [/^#\/tables$/, viewTables],
-  [/^#\/order\/(\d+)$/, viewOrder],
+  [/^#\/tables$/, viewTables, ["admin", "cashier", "waiter"]],
+  [/^#\/order\/(\d+)$/, viewOrder, ["admin", "cashier", "waiter"]],
+  [/^#\/kitchen$/, viewKitchen, ["admin", "cashier", "cook"]],
+  [/^#\/printers$/, viewPrinters, ["admin"]],
   [/^#\/cashier$/, viewCashier, ["admin", "cashier"]],
   [/^#\/reports$/, viewReports, ["admin", "cashier"]],
   [/^#\/menu$/, viewMenu, ["admin"]],

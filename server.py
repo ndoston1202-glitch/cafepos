@@ -10,8 +10,11 @@ import mimetypes
 import os
 import re
 import secrets
+import socket
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import threading
 import webbrowser
 from datetime import datetime, timedelta
@@ -25,8 +28,9 @@ DB_PATH = os.environ.get("CAFEPOS_DB", os.path.join(BASE_DIR, "cafepos.db"))
 PORT = int(os.environ.get("CAFEPOS_PORT", "8000"))
 SESSION_DAYS = 7
 
-ROLES = ("admin", "cashier", "waiter")
+ROLES = ("admin", "cashier", "waiter", "cook")
 PAYMENT_METHODS = ("cash", "card", "payme", "click")
+PRINTER_KINDS = ("network", "windows")
 
 db_lock = threading.Lock()
 
@@ -60,6 +64,11 @@ CREATE TABLE IF NOT EXISTS products (
     price INTEGER NOT NULL,
     active INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS halls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    sort INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS tables (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -87,9 +96,37 @@ CREATE TABLE IF NOT EXISTS order_items (
     price INTEGER NOT NULL,
     qty INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS printers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    address TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 9100,
+    width INTEGER NOT NULL DEFAULT 80,
+    active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS kitchen_tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES orders(id),
+    printer_id INTEGER REFERENCES printers(id),
+    lines TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new',
+    created_at TEXT NOT NULL,
+    ready_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id);
+CREATE INDEX IF NOT EXISTS idx_tickets_status ON kitchen_tickets(status);
 """
+
+# Eski bazalarga yangi ustunlar qo'shiladi (ma'lumot o'chmaydi)
+MIGRATIONS = [
+    ("tables", "hall_id", "INTEGER REFERENCES halls(id)"),
+    ("products", "printer_id", "INTEGER REFERENCES printers(id)"),
+    # Oshxona printeriga / ekraniga allaqachon yuborilgan miqdor
+    ("order_items", "printed_qty", "INTEGER NOT NULL DEFAULT 0"),
+    ("order_items", "kds_qty", "INTEGER NOT NULL DEFAULT 0"),
+]
 
 
 def connect():
@@ -111,6 +148,10 @@ def now():
 
 def init_db(conn):
     conn.executescript(SCHEMA)
+    for table, column, ddl in MIGRATIONS:
+        columns = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
     if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         pw, salt = hash_password("admin123")
         conn.execute(
@@ -133,7 +174,20 @@ def init_db(conn):
                 )
         for i in range(1, 9):
             conn.execute("INSERT INTO tables (name, seats) VALUES (?, ?)", (f"Stol {i}", 4))
+    if conn.execute("SELECT COUNT(*) FROM halls").fetchone()[0] == 0:
+        seed_halls(conn)
     conn.commit()
+
+
+def seed_halls(conn):
+    """Zallar yo'q bo'lsa: mavjud stollar "Asosiy zal"ga o'tadi, banket zali va kabinalar qo'shiladi."""
+    main = conn.execute("INSERT INTO halls (name, sort) VALUES ('Asosiy zal', 0)").lastrowid
+    conn.execute("UPDATE tables SET hall_id = ? WHERE hall_id IS NULL", (main,))
+    banquet = conn.execute("INSERT INTO halls (name, sort) VALUES ('Banket zali', 1)").lastrowid
+    conn.execute("INSERT INTO tables (name, seats, hall_id) VALUES ('Banket', 30, ?)", (banquet,))
+    cabins = conn.execute("INSERT INTO halls (name, sort) VALUES ('Kabinalar', 2)").lastrowid
+    for i in range(1, 5):
+        conn.execute("INSERT INTO tables (name, seats, hall_id) VALUES (?, 6, ?)", (f"Kabina {i}", cabins))
 
 
 # ---------------------------------------------------------------- yordamchilar
@@ -166,11 +220,25 @@ def to_int(value, field, minimum=None):
     return n
 
 
+def order_items_with_printer(conn, order_id):
+    # printer_id taomning HOZIRGI printeridan olinadi (o'chirilgan printer hisobga olinmaydi)
+    return rows(
+        conn.execute(
+            """SELECT i.*, pr.id AS printer_id FROM order_items i
+               LEFT JOIN products p ON p.id = i.product_id
+               LEFT JOIN printers pr ON pr.id = p.printer_id AND pr.active = 1
+               WHERE i.order_id = ? ORDER BY i.id""",
+            (order_id,),
+        )
+    )
+
+
 def order_detail(conn, order_id):
     order = conn.execute(
-        """SELECT o.*, t.name AS table_name, w.full_name AS waiter_name
+        """SELECT o.*, t.name AS table_name, h.name AS hall_name, w.full_name AS waiter_name
            FROM orders o
            LEFT JOIN tables t ON t.id = o.table_id
+           LEFT JOIN halls h ON h.id = t.hall_id
            LEFT JOIN users w ON w.id = o.waiter_id
            WHERE o.id = ?""",
         (order_id,),
@@ -178,10 +246,14 @@ def order_detail(conn, order_id):
     if not order:
         raise ApiError(404, "Buyurtma topilmadi")
     order = dict(order)
-    order["items"] = rows(
-        conn.execute("SELECT * FROM order_items WHERE order_id = ? ORDER BY id", (order_id,))
-    )
+    all_items = order_items_with_printer(conn, order_id)
+    # qty = 0 bo'lgan qatorlar oshxonaga yuborilganidan keyin bekor qilingan taomlar
+    order["items"] = [i for i in all_items if i["qty"] > 0]
     order["subtotal"] = sum(i["price"] * i["qty"] for i in order["items"])
+    order["pending_print"] = sum(
+        abs(i["qty"] - i["printed_qty"]) for i in all_items if i["printer_id"]
+    )
+    order["pending_kds"] = sum(abs(i["qty"] - i["kds_qty"]) for i in all_items)
     if order["status"] == "open":
         order["total"] = max(order["subtotal"] - order["discount"], 0)
     return order
@@ -261,8 +333,9 @@ def delete_category(conn, user, params, data, query):
 def list_products(conn, user, params, data, query):
     return rows(
         conn.execute(
-            """SELECT p.*, c.name AS category_name FROM products p
+            """SELECT p.*, c.name AS category_name, pr.name AS printer_name FROM products p
                LEFT JOIN categories c ON c.id = p.category_id
+               LEFT JOIN printers pr ON pr.id = p.printer_id AND pr.active = 1
                WHERE p.active = 1 ORDER BY c.sort, c.name, p.name"""
         )
     )
@@ -274,13 +347,15 @@ def product_values(data):
         data.get("category_id") or None,
         data["name"].strip(),
         to_int(data["price"], "price", 0),
+        data.get("printer_id") or None,
     )
 
 
 @route("POST", "/api/products", ("admin",))
 def create_product(conn, user, params, data, query):
     cur = conn.execute(
-        "INSERT INTO products (category_id, name, price) VALUES (?,?,?)", product_values(data)
+        "INSERT INTO products (category_id, name, price, printer_id) VALUES (?,?,?,?)",
+        product_values(data),
     )
     return {"id": cur.lastrowid}
 
@@ -288,7 +363,7 @@ def create_product(conn, user, params, data, query):
 @route("PUT", r"/api/products/(\d+)", ("admin",))
 def update_product(conn, user, params, data, query):
     conn.execute(
-        "UPDATE products SET category_id = ?, name = ?, price = ? WHERE id = ?",
+        "UPDATE products SET category_id = ?, name = ?, price = ?, printer_id = ? WHERE id = ?",
         (*product_values(data), params[0]),
     )
     return {"ok": True}
@@ -301,12 +376,71 @@ def delete_product(conn, user, params, data, query):
     return {"ok": True}
 
 
+# --- zallar
+
+
+@route("GET", "/api/halls")
+def list_halls(conn, user, params, data, query):
+    return rows(
+        conn.execute(
+            """SELECT h.*, (SELECT COUNT(*) FROM tables t WHERE t.hall_id = h.id AND t.active = 1) AS tables
+               FROM halls h ORDER BY h.sort, h.id"""
+        )
+    )
+
+
+@route("POST", "/api/halls", ("admin",))
+def create_hall(conn, user, params, data, query):
+    require(data, "name")
+    cur = conn.execute(
+        "INSERT INTO halls (name, sort) VALUES (?, ?)",
+        (data["name"].strip(), to_int(data.get("sort") or 0, "sort")),
+    )
+    return {"id": cur.lastrowid}
+
+
+@route("PUT", r"/api/halls/(\d+)", ("admin",))
+def update_hall(conn, user, params, data, query):
+    require(data, "name")
+    conn.execute(
+        "UPDATE halls SET name = ?, sort = ? WHERE id = ?",
+        (data["name"].strip(), to_int(data.get("sort") or 0, "sort"), params[0]),
+    )
+    return {"ok": True}
+
+
+@route("DELETE", r"/api/halls/(\d+)", ("admin",))
+def delete_hall(conn, user, params, data, query):
+    used = conn.execute(
+        "SELECT COUNT(*) FROM tables WHERE hall_id = ? AND active = 1", (params[0],)
+    ).fetchone()[0]
+    if used:
+        raise ApiError(409, "Zalda stollar bor. Avval ularni o'chiring yoki boshqa zalga o'tkazing")
+    conn.execute("UPDATE tables SET hall_id = NULL WHERE hall_id = ?", (params[0],))
+    conn.execute("DELETE FROM halls WHERE id = ?", (params[0],))
+    return {"ok": True}
+
+
 # --- stollar
+
+
+def table_values(conn, data):
+    require(data, "name")
+    hall_id = data.get("hall_id") or None
+    if hall_id and not conn.execute("SELECT 1 FROM halls WHERE id = ?", (hall_id,)).fetchone():
+        raise ApiError(404, "Zal topilmadi")
+    return data["name"].strip(), to_int(data.get("seats") or 4, "seats", 1), hall_id
 
 
 @route("GET", "/api/tables")
 def list_tables(conn, user, params, data, query):
-    tables = rows(conn.execute("SELECT * FROM tables WHERE active = 1 ORDER BY id"))
+    tables = rows(
+        conn.execute(
+            """SELECT t.*, h.name AS hall_name FROM tables t
+               LEFT JOIN halls h ON h.id = t.hall_id
+               WHERE t.active = 1 ORDER BY COALESCE(h.sort, 999), h.id, t.id"""
+        )
+    )
     open_orders = {
         r["table_id"]: dict(r)
         for r in conn.execute(
@@ -326,20 +460,18 @@ def list_tables(conn, user, params, data, query):
 
 @route("POST", "/api/tables", ("admin",))
 def create_table(conn, user, params, data, query):
-    require(data, "name")
     cur = conn.execute(
-        "INSERT INTO tables (name, seats) VALUES (?, ?)",
-        (data["name"].strip(), to_int(data.get("seats", 4), "seats", 1)),
+        "INSERT INTO tables (name, seats, hall_id) VALUES (?, ?, ?)",
+        table_values(conn, data),
     )
     return {"id": cur.lastrowid}
 
 
 @route("PUT", r"/api/tables/(\d+)", ("admin",))
 def update_table(conn, user, params, data, query):
-    require(data, "name")
     conn.execute(
-        "UPDATE tables SET name = ?, seats = ? WHERE id = ?",
-        (data["name"].strip(), to_int(data.get("seats", 4), "seats", 1), params[0]),
+        "UPDATE tables SET name = ?, seats = ?, hall_id = ? WHERE id = ?",
+        (*table_values(conn, data), params[0]),
     )
     return {"ok": True}
 
@@ -363,10 +495,11 @@ def list_orders(conn, user, params, data, query):
     status = query.get("status", ["open"])[0]
     return rows(
         conn.execute(
-            """SELECT o.*, t.name AS table_name, u.full_name AS waiter_name,
+            """SELECT o.*, t.name AS table_name, h.name AS hall_name, u.full_name AS waiter_name,
                       COALESCE((SELECT SUM(price * qty) FROM order_items WHERE order_id = o.id), 0) AS subtotal
                FROM orders o
                LEFT JOIN tables t ON t.id = o.table_id
+               LEFT JOIN halls h ON h.id = t.hall_id
                LEFT JOIN users u ON u.id = o.waiter_id
                WHERE o.status = ? ORDER BY o.id DESC LIMIT 200""",
             (status,),
@@ -433,7 +566,15 @@ def update_item(conn, user, params, data, query):
     open_order(conn, params[0])
     qty = to_int(data.get("qty"), "qty", 0)
     if qty == 0:
-        conn.execute("DELETE FROM order_items WHERE id = ? AND order_id = ?", (params[1], params[0]))
+        # Oshxonaga hali yuborilmagan bo'lsa o'chiramiz, aks holda "bekor" bo'lib yuborilishi uchun qoldiramiz
+        conn.execute(
+            """DELETE FROM order_items WHERE id = ? AND order_id = ?
+               AND printed_qty = 0 AND kds_qty = 0""",
+            (params[1], params[0]),
+        )
+        conn.execute(
+            "UPDATE order_items SET qty = 0 WHERE id = ? AND order_id = ?", (params[1], params[0])
+        )
     else:
         conn.execute(
             "UPDATE order_items SET qty = ? WHERE id = ? AND order_id = ?", (qty, params[1], params[0])
@@ -466,6 +607,233 @@ def cancel_order(conn, user, params, data, query):
     conn.execute(
         "UPDATE orders SET status = 'cancelled', cashier_id = ?, closed_at = ? WHERE id = ?",
         (user["id"], now(), params[0]),
+    )
+    # Bekor qilingan buyurtma oshxona ekranida qolmasin
+    conn.execute(
+        "UPDATE kitchen_tickets SET status = 'cancelled' WHERE order_id = ? AND status = 'new'",
+        (params[0],),
+    )
+    return {"ok": True}
+
+
+# --- printerlar (ESC/POS termoprinterlar)
+
+ESC_INIT = b"\x1b@"
+ESC_CP866 = b"\x1bt\x11"  # kirill harflari uchun kod sahifasi
+ESC_CENTER, ESC_LEFT = b"\x1ba\x01", b"\x1ba\x00"
+ESC_BOLD_ON, ESC_BOLD_OFF = b"\x1bE\x01", b"\x1bE\x00"
+GS_BIG, GS_NORMAL = b"\x1d!\x11", b"\x1d!\x00"
+GS_CUT = b"\n\n\n\n\x1dVB\x00"
+
+
+def esc_text(text):
+    for a, b in (("ʻ", "'"), ("ʼ", "'"), ("‘", "'"), ("’", "'"), ("—", "-"), ("№", "N")):
+        text = text.replace(a, b)
+    return text.encode("cp866", errors="replace")
+
+
+def kitchen_ticket_bytes(printer, order, lines):
+    width = 48 if printer["width"] >= 80 else 32
+    place = "OLIB KETISH" if order["type"] == "takeaway" else order["table_name"] or ""
+    out = [ESC_INIT, ESC_CP866, ESC_CENTER, ESC_BOLD_ON, esc_text(printer["name"].upper()), b"\n", ESC_BOLD_OFF]
+    out += [GS_BIG, esc_text(f"{place}  #{order['id']}"), b"\n", GS_NORMAL]
+    if order.get("hall_name"):
+        out += [ESC_BOLD_ON, esc_text(order["hall_name"]), b"\n", ESC_BOLD_OFF]
+    out += [esc_text(f"Ofitsiant: {order['waiter_name'] or '-'}"), b"\n"]
+    out += [esc_text(datetime.now().strftime("%d.%m.%Y %H:%M")), b"\n", ESC_LEFT, b"-" * width, b"\n"]
+    for line in lines:
+        if line["qty"] > 0:
+            text = f"{line['qty']} x {line['name']}"
+        else:
+            text = f"BEKOR: {-line['qty']} x {line['name']}"
+        out += [GS_BIG, esc_text(text), b"\n", GS_NORMAL]
+    out += [b"-" * width, b"\n", GS_CUT]
+    return b"".join(out)
+
+
+def send_to_printer(printer, payload):
+    """Printerga xom ESC/POS ma'lumot yuboradi. Xato bo'lsa ApiError ko'taradi."""
+    if printer["kind"] == "network":
+        try:
+            with socket.create_connection((printer["address"], printer["port"]), timeout=5) as s:
+                s.sendall(payload)
+        except OSError as e:
+            raise ApiError(502, f"'{printer['name']}' printeriga ulanib bo'lmadi ({printer['address']}): {e}")
+        return
+    # Windows: ulashilgan (shared) printerga "copy /b" orqali xom ma'lumot
+    if os.name != "nt":
+        raise ApiError(400, "Windows printeri faqat Windows kompyuterda ishlaydi")
+    target = printer["address"]
+    if not target.startswith("\\\\"):
+        target = "\\\\localhost\\" + target
+    fd, path = tempfile.mkstemp(suffix=".bin")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        result = subprocess.run(
+            ["cmd", "/c", "copy", "/b", path, target],
+            capture_output=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        raise ApiError(502, f"'{printer['name']}' printeri javob bermadi")
+    finally:
+        os.remove(path)
+    if result.returncode != 0:
+        raise ApiError(502, f"'{printer['name']}' printeriga chiqmadi ({target}). Printer ulashilganini tekshiring")
+
+
+def printer_values(data):
+    require(data, "name", "kind", "address")
+    if data["kind"] not in PRINTER_KINDS:
+        raise ApiError(400, "Noto'g'ri printer turi")
+    width = to_int(data.get("width", 80), "width")
+    return (
+        data["name"].strip(),
+        data["kind"],
+        data["address"].strip(),
+        to_int(data.get("port") or 9100, "port", 1),
+        80 if width >= 80 else 58,
+    )
+
+
+@route("GET", "/api/printers")
+def list_printers(conn, user, params, data, query):
+    return rows(conn.execute("SELECT * FROM printers WHERE active = 1 ORDER BY id"))
+
+
+@route("POST", "/api/printers", ("admin",))
+def create_printer(conn, user, params, data, query):
+    cur = conn.execute(
+        "INSERT INTO printers (name, kind, address, port, width) VALUES (?,?,?,?,?)",
+        printer_values(data),
+    )
+    return {"id": cur.lastrowid}
+
+
+@route("PUT", r"/api/printers/(\d+)", ("admin",))
+def update_printer(conn, user, params, data, query):
+    conn.execute(
+        "UPDATE printers SET name = ?, kind = ?, address = ?, port = ?, width = ? WHERE id = ?",
+        (*printer_values(data), params[0]),
+    )
+    return {"ok": True}
+
+
+@route("DELETE", r"/api/printers/(\d+)", ("admin",))
+def delete_printer(conn, user, params, data, query):
+    conn.execute("UPDATE printers SET active = 0 WHERE id = ?", (params[0],))
+    conn.execute("UPDATE products SET printer_id = NULL WHERE printer_id = ?", (params[0],))
+    return {"ok": True}
+
+
+def get_printer(conn, printer_id):
+    printer = conn.execute(
+        "SELECT * FROM printers WHERE id = ? AND active = 1", (printer_id,)
+    ).fetchone()
+    if not printer:
+        raise ApiError(404, "Printer topilmadi")
+    return dict(printer)
+
+
+@route("POST", r"/api/printers/(\d+)/test", ("admin",))
+def test_printer(conn, user, params, data, query):
+    printer = get_printer(conn, params[0])
+    fake_order = {"id": 0, "type": "takeaway", "table_name": "", "waiter_name": user["full_name"]}
+    send_to_printer(printer, kitchen_ticket_bytes(printer, fake_order, [{"name": "TEST", "qty": 1}]))
+    return {"ok": True}
+
+
+# --- oshxonaga yuborish
+
+
+def pending_lines(items, sent_field, only_with_printer):
+    """Oshxonaga hali yuborilmagan o'zgarishlar, printer bo'yicha guruhlangan."""
+    groups = {}
+    for i in items:
+        delta = i["qty"] - i[sent_field]
+        if delta == 0 or (only_with_printer and not i["printer_id"]):
+            continue
+        groups.setdefault(i["printer_id"], []).append(
+            {"item_id": i["id"], "name": i["name"], "qty": delta, "sent": i["qty"]}
+        )
+    return groups
+
+
+@route("POST", r"/api/orders/(\d+)/kitchen-print")
+def kitchen_print(conn, user, params, data, query):
+    order = open_order(conn, params[0])
+    items = order_items_with_printer(conn, params[0])
+    groups = pending_lines(items, "printed_qty", only_with_printer=True)
+    if not groups:
+        if any(i["qty"] != i["printed_qty"] for i in items):
+            raise ApiError(400, "Bu taomlarga printer tanlanmagan. Menyu bo'limida printer biriktiring")
+        raise ApiError(400, "Oshxonaga yuboriladigan yangi taom yo'q")
+    printed, errors = [], []
+    for printer_id, lines in groups.items():
+        printer = get_printer(conn, printer_id)
+        try:
+            send_to_printer(printer, kitchen_ticket_bytes(printer, order, lines))
+        except ApiError as e:
+            errors.append(e.message)
+            continue
+        for line in lines:
+            conn.execute(
+                "UPDATE order_items SET printed_qty = ? WHERE id = ?", (line["sent"], line["item_id"])
+            )
+        printed.append(printer["name"])
+    if not printed:
+        raise ApiError(502, "; ".join(errors))
+    result = order_detail(conn, params[0])
+    result["printed"], result["errors"] = printed, errors
+    return result
+
+
+@route("POST", r"/api/orders/(\d+)/kitchen-send")
+def kitchen_send(conn, user, params, data, query):
+    open_order(conn, params[0])
+    groups = pending_lines(order_items_with_printer(conn, params[0]), "kds_qty", only_with_printer=False)
+    if not groups:
+        raise ApiError(400, "Oshxonaga yuboriladigan yangi taom yo'q")
+    for printer_id, lines in groups.items():
+        conn.execute(
+            "INSERT INTO kitchen_tickets (order_id, printer_id, lines, created_at) VALUES (?,?,?,?)",
+            (params[0], printer_id,
+             json.dumps([{"name": l["name"], "qty": l["qty"]} for l in lines], ensure_ascii=False), now()),
+        )
+        for line in lines:
+            conn.execute("UPDATE order_items SET kds_qty = ? WHERE id = ?", (line["sent"], line["item_id"]))
+    return order_detail(conn, params[0])
+
+
+@route("GET", "/api/kitchen", ("admin", "cashier", "cook"))
+def kitchen_tickets(conn, user, params, data, query):
+    sql = """SELECT k.*, o.type, t.name AS table_name, h.name AS hall_name,
+                    u.full_name AS waiter_name, pr.name AS printer_name
+             FROM kitchen_tickets k
+             JOIN orders o ON o.id = k.order_id
+             LEFT JOIN tables t ON t.id = o.table_id
+             LEFT JOIN halls h ON h.id = t.hall_id
+             LEFT JOIN users u ON u.id = o.waiter_id
+             LEFT JOIN printers pr ON pr.id = k.printer_id
+             WHERE k.status = 'new'"""
+    args = []
+    station = query.get("printer_id", [""])[0]
+    if station == "none":
+        sql += " AND k.printer_id IS NULL"
+    elif station:
+        sql += " AND k.printer_id = ?"
+        args.append(to_int(station, "printer_id"))
+    tickets = rows(conn.execute(sql + " ORDER BY k.id", args))
+    for t in tickets:
+        t["lines"] = json.loads(t["lines"])
+    return tickets
+
+
+@route("POST", r"/api/kitchen/(\d+)/ready", ("admin", "cashier", "cook"))
+def kitchen_ready(conn, user, params, data, query):
+    conn.execute(
+        "UPDATE kitchen_tickets SET status = 'ready', ready_at = ? WHERE id = ?", (now(), params[0])
     )
     return {"ok": True}
 
@@ -522,9 +890,10 @@ def report(conn, user, params, data, query):
         "orders": rows(
             conn.execute(
                 f"""SELECT o.id, o.type, o.total, o.discount, o.payment_method, o.closed_at,
-                           t.name AS table_name, u.full_name AS waiter_name
+                           t.name AS table_name, h.name AS hall_name, u.full_name AS waiter_name
                     FROM orders o
                     LEFT JOIN tables t ON t.id = o.table_id
+                    LEFT JOIN halls h ON h.id = t.hall_id
                     LEFT JOIN users u ON u.id = o.waiter_id
                     WHERE {where} ORDER BY o.closed_at DESC""",
                 rng,
