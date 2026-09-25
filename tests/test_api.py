@@ -1,5 +1,6 @@
 """API testlari:  python -m unittest discover tests"""
 
+import base64
 import json
 import os
 import socket
@@ -46,6 +47,7 @@ class ApiTest(unittest.TestCase):
         import server
 
         server.DB_PATH = os.environ["CAFEPOS_DB"]
+        server.UPLOAD_DIR = os.path.join(cls.tmp.name, "uploads")
         cls.server = server.make_server(port=0, host="127.0.0.1")
         cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
@@ -307,10 +309,102 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.admin.call("POST", f"/api/orders/{order['id']}/cancel")
 
+    def test_cost_image_and_profit(self):
+        png = base64.b64encode(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+        ).decode()
+        status, prod = self.admin.call("POST", "/api/products", {
+            "name": "Salat Sezar", "price": 30000, "cost": 12000, "image": "data:image/png;base64," + png,
+        })
+        self.assertEqual(status, 200)
+        _, products = self.admin.call("GET", "/api/products")
+        p = next(x for x in products if x["id"] == prod["id"])
+        self.assertEqual(p["cost"], 12000)
+        self.assertTrue(p["image"])
+
+        from urllib.request import urlopen
+        with urlopen(self.base + "/uploads/" + p["image"]) as res:
+            self.assertTrue(res.read().startswith(b"\x89PNG"))
+
+        # Noto'g'ri fayl turi
+        status, _ = self.admin.call("PUT", f"/api/products/{p['id']}", {
+            "name": "Salat Sezar", "price": 30000, "image": "data:text/html;base64,PGgxPg==",
+        })
+        self.assertEqual(status, 400)
+
+        # Foyda hisoboti: 2 x (30000 - 12000) = 36000
+        _, before = self.admin.call("GET", "/api/reports")
+        order = self.new_order_with(p["id"], p["id"])
+        self.admin.call("POST", f"/api/orders/{order['id']}/pay", {"method": "cash"})
+        _, after = self.admin.call("GET", "/api/reports")
+        self.assertEqual(after["summary"]["cost"] - before["summary"]["cost"], 24000)
+        self.assertEqual(after["summary"]["profit"] - before["summary"]["profit"], 36000)
+
+        # Rasmni o'chirish - fayl ham o'chadi
+        self.admin.call("PUT", f"/api/products/{p['id']}", {
+            "name": "Salat Sezar", "price": 30000, "cost": 12000, "remove_image": True,
+        })
+        self.assertFalse(os.path.exists(os.path.join(self.server_module().UPLOAD_DIR, p["image"])))
+
+    @staticmethod
+    def server_module():
+        import server
+        return server
+
+    def test_system_printer_kind(self):
+        status, _ = self.admin.call("POST", "/api/printers", {"name": "Bar", "kind": "system", "address": ""})
+        self.assertEqual(status, 400)
+        status, pr = self.admin.call("POST", "/api/printers", {"name": "Bar", "kind": "system", "address": "XP-80C"})
+        self.assertEqual(status, 200)
+        status, devices = self.admin.call("GET", "/api/printers/system")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(devices, list)
+        status, _ = self.waiter.call("GET", "/api/printers/system")
+        self.assertEqual(status, 403)
+        self.admin.call("DELETE", f"/api/printers/{pr['id']}")
+
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})
         self.assertEqual(status, 400)
+
+
+class PrintingTest(unittest.TestCase):
+    def test_scan_finds_open_port(self):
+        import printing
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        try:
+            found = printing.scan_network(port=port, hosts=["127.0.0.1", "127.0.0.2"])
+        finally:
+            listener.close()
+        self.assertEqual(found, [{"address": "127.0.0.1", "port": port}])
+
+    def test_connection_type(self):
+        import printing
+
+        self.assertEqual(printing.connection_type("USB001"), "USB")
+        self.assertEqual(printing.connection_type("WSD-1234"), "Wi-Fi / tarmoq")
+        self.assertEqual(printing.connection_type("192.168.1.50"), "Wi-Fi / tarmoq")
+
+    def test_virtual_printers_hidden(self):
+        import printing
+
+        fake = [
+            {"name": "XP-80C", "port": "USB001", "connection": "USB"},
+            {"name": "Microsoft Print to PDF", "port": "PORTPROMPT:", "connection": ""},
+            {"name": "Fax", "port": "SHRFAX:", "connection": ""},
+        ]
+        original = printing._cups_printers
+        printing._cups_printers = lambda: fake
+        try:
+            if os.name != "nt":
+                self.assertEqual([p["name"] for p in printing.list_system_printers()], ["XP-80C"])
+        finally:
+            printing._cups_printers = original
 
 
 class MigrationTest(unittest.TestCase):

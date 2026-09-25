@@ -4,7 +4,11 @@
 const state = { user: null, categories: [], products: [] };
 
 const ROLE_NAMES = { admin: "Administrator", cashier: "Kassir", waiter: "Ofitsiant", cook: "Oshpaz" };
-const PRINTER_KINDS = { network: "Tarmoq (IP manzil)", windows: "Windows (ulashilgan USB printer)" };
+const PRINTER_KINDS = {
+  system: "Kompyuterga ulangan (USB / Wi-Fi)",
+  network: "Tarmoq termoprinteri (IP manzil)",
+  windows: "Ulashilgan printer (eski)",
+};
 const METHOD_NAMES = { cash: "Naqd", card: "Karta", payme: "Payme", click: "Click" };
 
 // ------------------------------------------------------------ yordamchilar
@@ -98,6 +102,31 @@ function openModal(html, onMount) {
 
 function closeModal() {
   $("#modal-root").innerHTML = "";
+}
+
+// Rasmni kichraytirib JPEG data URL qiladi (server va tarmoqqa yengil bo'lsin)
+function resizeImage(file, maxSize) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Rasmni o'qib bo'lmadi"));
+    };
+    img.src = url;
+  });
 }
 
 function formData(form) {
@@ -274,7 +303,8 @@ async function viewOrder(id) {
     const list = state.products.filter((p) => activeCat === "all" || String(p.category_id) === String(activeCat));
     const closed = order.status !== "open";
     $("#products").innerHTML = list.map((p) => `
-      <button class="product-card" data-id="${p.id}" ${closed ? "disabled" : ""}>
+      <button class="product-card ${p.image ? "with-img" : ""}" data-id="${p.id}" ${closed ? "disabled" : ""}>
+        ${p.image ? `<img src="/uploads/${encodeURIComponent(p.image)}" alt="" loading="lazy">` : ""}
         <span>${esc(p.name)}</span>
         <span class="price">${money(p.price)}</span>
       </button>`).join("") || `<p class="muted">Bu kategoriyada taom yo'q</p>`;
@@ -488,6 +518,8 @@ async function viewReports() {
       <div class="stat"><div class="label">Tushum</div><div class="value">${money(r.summary.revenue)}</div></div>
       <div class="stat"><div class="label">Buyurtmalar</div><div class="value">${r.summary.orders}</div></div>
       <div class="stat"><div class="label">O'rtacha chek</div><div class="value">${money(r.summary.average)}</div></div>
+      <div class="stat"><div class="label">Tannarx</div><div class="value">${money(r.summary.cost)}</div></div>
+      <div class="stat"><div class="label">Foyda</div><div class="value profit">${money(r.summary.profit)}</div></div>
       <div class="stat"><div class="label">Chegirmalar</div><div class="value">${money(r.summary.discount)}</div></div>
     </div>
     <div class="report-grid">
@@ -499,7 +531,8 @@ async function viewReports() {
       </div>
       <div class="panel"><h3>Ko'p sotilgan taomlar</h3>
         <table class="list">
-          ${r.top_products.map((p) => `<tr><td>${esc(p.name)}</td><td>${p.qty} ta</td><td class="right">${money(p.revenue)}</td></tr>`).join("")
+          ${r.top_products.map((p) => `<tr><td>${esc(p.name)}</td><td>${p.qty} ta</td><td class="right">${money(p.revenue)}</td>
+            <td class="right muted" title="Foyda">+${money(p.profit)}</td></tr>`).join("")
             || `<tr><td class="muted">Ma'lumot yo'q</td></tr>`}
         </table>
       </div>
@@ -552,16 +585,20 @@ async function viewMenu() {
       <div class="panel">
         <div class="toolbar"><h2>Taomlar</h2><button class="btn primary small" id="add-prod">+ Taom qo'shish</button></div>
         <table class="list">
-          <thead><tr><th>Nomi</th><th>Kategoriya</th><th>Printer</th><th class="right">Narxi</th><th></th></tr></thead>
+          <thead><tr><th></th><th>Nomi</th><th>Kategoriya</th><th>Printer</th>
+            <th class="right">Tannarx</th><th class="right">Sotish narxi</th><th class="right">Foyda</th><th></th></tr></thead>
           <tbody>
             ${state.products.map((p) => `
-              <tr><td>${esc(p.name)}</td><td>${esc(catName(p.category_id))}</td>
+              <tr><td class="thumb-cell">${p.image ? `<img class="thumb" src="/uploads/${encodeURIComponent(p.image)}" alt="">` : `<div class="thumb empty">🍽️</div>`}</td>
+                <td>${esc(p.name)}</td><td>${esc(catName(p.category_id))}</td>
                 <td>${p.printer_name ? `🖨️ ${esc(p.printer_name)}` : `<span class="muted">—</span>`}</td>
+                <td class="right muted">${p.cost ? money(p.cost) : "—"}</td>
                 <td class="right">${money(p.price)}</td>
+                <td class="right">${p.cost ? money(p.price - p.cost) : "—"}</td>
                 <td class="right">
                   <button class="btn small" data-edit-prod="${p.id}">✏️</button>
                   <button class="btn small danger" data-del-prod="${p.id}">🗑</button>
-                </td></tr>`).join("") || `<tr><td colspan="5" class="muted">Taom yo'q</td></tr>`}
+                </td></tr>`).join("") || `<tr><td colspan="8" class="muted">Taom yo'q</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -581,29 +618,84 @@ async function viewMenu() {
   })));
 
   const prodForm = (p = {}) => openModal(`
-    <form id="f"><h2>${p.id ? "Taomni tahrirlash" : "Yangi taom"}</h2>
-      <label><span>Nomi</span><input name="name" value="${esc(p.name || "")}" required></label>
-      <label><span>Narxi (so'm)</span><input name="price" type="number" min="0" value="${p.price ?? ""}" required></label>
-      <label><span>Kategoriya</span>
+    <form id="f" class="product-form"><h2>${p.id ? "Taomni tahrirlash" : "Yangi taom"}</h2>
+      <label><span>Mahsulot nomi</span><input name="name" value="${esc(p.name || "")}" placeholder="Masalan: Osh" required></label>
+      <div class="grid-2">
+        <label><span>Tannarxi (so'm)</span><input name="cost" type="number" min="0" value="${p.cost || ""}" placeholder="0"></label>
+        <label><span>Sotish narxi (so'm)</span><input name="price" type="number" min="0" value="${p.price ?? ""}" required></label>
+      </div>
+      <div class="muted" id="margin"></div>
+      <div class="image-field">
+        <div class="image-preview" id="img-preview"></div>
+        <div>
+          <span class="field-label">Rasmi</span>
+          <label class="btn small file-btn">📷 Rasm tanlash<input type="file" id="img-input" accept="image/*" hidden></label>
+          <button type="button" class="btn small danger hidden" id="img-remove">O'chirish</button>
+        </div>
+      </div>
+      <label><span>Kategoriyasi</span>
         <select name="category_id">
           <option value="">— Kategoriyasiz —</option>
           ${state.categories.map((c) => `<option value="${c.id}" ${c.id === p.category_id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
         </select></label>
-      <label><span>Oshxona printeri (bu taom qaysi printerdan chiqadi)</span>
+      <label><span>Qaysi printerdan chiqadi <i>(ixtiyoriy)</i></span>
         <select name="printer_id">
           <option value="">— Printersiz —</option>
-          ${printers.map((pr) => `<option value="${pr.id}" ${pr.id === p.printer_id ? "selected" : ""}>${esc(pr.name)}</option>`).join("")}
+          ${printers.map((pr) => `<option value="${pr.id}" ${pr.id === p.printer_id ? "selected" : ""}>🖨️ ${esc(pr.name)}</option>`).join("")}
         </select>
-        ${printers.length ? "" : `<small class="muted">Printerlar hali qo'shilmagan — "🖨️ Printerlar" bo'limida qo'shing</small>`}
+        <small class="muted">${printers.length
+          ? "Masalan: osh → Oshxona, salat → Salatxona, ichimlik → Bar"
+          : "Printerlar hali qo'shilmagan — \"🖨️ Printerlar\" bo'limida qo'shing"}</small>
       </label>
       <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
-    </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
-    e.preventDefault();
-    await api(p.id ? "PUT" : "POST", "/api/products" + (p.id ? "/" + p.id : ""), formData(e.target));
-    closeModal();
-    toast("Saqlandi");
-    viewMenu();
-  })));
+    </form>`, (m) => {
+    let image = null;        // yangi tanlangan rasm (data URL)
+    let removeImage = false;
+    const preview = $("#img-preview", m);
+    const showPreview = () => {
+      const src = image || (!removeImage && p.image ? "/uploads/" + encodeURIComponent(p.image) : null);
+      preview.innerHTML = src ? `<img src="${src}" alt="">` : "🍽️";
+      $("#img-remove", m).classList.toggle("hidden", !src);
+    };
+    const showMargin = () => {
+      const cost = +$("input[name=cost]", m).value || 0;
+      const price = +$("input[name=price]", m).value || 0;
+      $("#margin", m).textContent = cost && price ? `Foyda: ${money(price - cost)} (${Math.round((price - cost) / price * 100)}%)` : "";
+    };
+    $("#img-input", m).addEventListener("change", safe(async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      image = await resizeImage(file, 600);
+      removeImage = false;
+      showPreview();
+    }));
+    $("#img-remove", m).addEventListener("click", () => {
+      image = null;
+      removeImage = true;
+      $("#img-input", m).value = "";
+      showPreview();
+    });
+    $("input[name=cost]", m).addEventListener("input", showMargin);
+    $("input[name=price]", m).addEventListener("input", showMargin);
+    showPreview();
+    showMargin();
+    $("#f", m).addEventListener("submit", safe(async (e) => {
+      e.preventDefault();
+      const data = formData(e.target);
+      if (image) data.image = image;
+      if (removeImage) data.remove_image = true;
+      const btn = $("button.primary", e.target);
+      btn.disabled = true;
+      try {
+        await api(p.id ? "PUT" : "POST", "/api/products" + (p.id ? "/" + p.id : ""), data);
+      } finally {
+        btn.disabled = false;
+      }
+      closeModal();
+      toast("Saqlandi");
+      viewMenu();
+    }));
+  });
 
   $("#add-cat").addEventListener("click", () => catForm());
   $("#add-prod").addEventListener("click", () => prodForm());
@@ -780,38 +872,97 @@ async function viewPrinters() {
       </table>
     </div>`);
 
-  const form = (p = { kind: "network", port: 9100, width: 80 }) => openModal(`
+  const form = (p = { kind: "system", port: 9100, width: 80 }) => openModal(`
     <form id="f"><h2>${p.id ? "Printerni tahrirlash" : "Yangi printer"}</h2>
-      <label><span>Nomi (masalan: Oshxona, Salat, Bar)</span><input name="name" value="${esc(p.name || "")}" required></label>
-      <label><span>Ulanish turi</span>
-        <select name="kind">${Object.entries(PRINTER_KINDS).map(([k, v]) =>
-          `<option value="${k}" ${k === p.kind ? "selected" : ""}>${v}</option>`).join("")}</select></label>
-      <label><span id="addr-label"></span><input name="address" value="${esc(p.address || "")}" required></label>
-      <label id="port-box"><span>Port</span><input name="port" type="number" value="${p.port}"></label>
+      <label><span>Nomi (masalan: Oshxona, Salatxona, Bar)</span><input name="name" value="${esc(p.name || "")}" required></label>
+      <div class="kind-switch">
+        ${["system", "network"].map((k) => `
+          <label class="kind-option"><input type="radio" name="kind" value="${k}" ${k === p.kind ? "checked" : ""}>
+            <span>${k === "system" ? "🔌 USB / Wi-Fi<small>Kompyuterga o'rnatilgan printer</small>"
+                                   : "🌐 Tarmoq (IP)<small>LAN / Wi-Fi termoprinter, 9100-port</small>"}</span></label>`).join("")}
+      </div>
+      <div id="system-box">
+        <span class="field-label">Kompyuterga ulangan printerlar</span>
+        <div class="device-list" id="system-list"><p class="muted">Qidirilmoqda...</p></div>
+        <button type="button" class="btn small" id="system-refresh">🔄 Yangilash</button>
+      </div>
+      <div id="network-box">
+        <div class="grid-2">
+          <label><span>IP manzil</span><input name="ip" value="${p.kind === "network" ? esc(p.address || "") : ""}" placeholder="192.168.1.100"></label>
+          <label><span>Port</span><input name="port" type="number" value="${p.port || 9100}"></label>
+        </div>
+        <button type="button" class="btn small" id="scan-btn">🔍 Tarmoqdan qidirish</button>
+        <div class="device-list" id="scan-list"></div>
+      </div>
       <label><span>Qog'oz kengligi</span>
         <select name="width">
           <option value="80" ${p.width >= 80 ? "selected" : ""}>80 mm</option>
           <option value="58" ${p.width < 80 ? "selected" : ""}>58 mm</option>
         </select></label>
-      <p class="muted" id="kind-help"></p>
       <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
     </form>`, (m) => {
-    const kind = $("select[name=kind]", m);
+    let systemName = p.kind === "system" || p.kind === "windows" ? p.address : "";
+    const kind = () => $("input[name=kind]:checked", m).value;
     const sync = () => {
-      const net = kind.value === "network";
-      $("#addr-label", m).textContent = net ? "Printer IP manzili (masalan: 192.168.1.100)" : "Ulashilgan printer nomi (Share name)";
-      $("input[name=address]", m).placeholder = net ? "192.168.1.100" : "XP80";
-      $("#port-box", m).classList.toggle("hidden", !net);
-      $("#kind-help", m).textContent = net
-        ? "LAN (Ethernet/Wi-Fi) termoprinter. IP manzil printerning o'z-o'zini sinov chekida yozilgan bo'ladi. Port odatda 9100."
-        : "USB printer: Windows'da Boshqaruv paneli → Qurilmalar va printerlar → printer xususiyatlari → Kirish (Sharing) → " +
-          "\"Bu printerni ulashish\" ni belgilang va qisqa nom bering (masalan XP80). Shu nomni bu yerga yozing.";
+      $("#system-box", m).classList.toggle("hidden", kind() !== "system");
+      $("#network-box", m).classList.toggle("hidden", kind() !== "network");
     };
-    kind.addEventListener("change", sync);
+
+    async function loadSystem() {
+      const list = $("#system-list", m);
+      list.innerHTML = `<p class="muted">Qidirilmoqda...</p>`;
+      let devices;
+      try {
+        devices = await api("GET", "/api/printers/system");
+      } catch (e) {
+        list.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+        return;
+      }
+      if (systemName && !devices.some((d) => d.name === systemName)) {
+        devices.unshift({ name: systemName, connection: "hozir topilmadi", port: "" });
+      }
+      list.innerHTML = devices.map((d) => `
+        <label class="device ${d.name === systemName ? "selected" : ""}">
+          <input type="radio" name="device" value="${esc(d.name)}" ${d.name === systemName ? "checked" : ""}>
+          <span><b>${esc(d.name)}</b><small>${esc(d.connection)}${d.port && d.port !== d.connection ? " · " + esc(d.port) : ""}</small></span>
+        </label>`).join("") || `<p class="muted">Printer topilmadi. Printerni USB yoki Wi-Fi orqali ulab, Windows'da o'rnating
+          (drayverini o'rnating), so'ng "Yangilash" ni bosing.</p>`;
+      $$("input[name=device]", list).forEach((r) => r.addEventListener("change", () => {
+        systemName = r.value;
+        $$(".device", list).forEach((d) => d.classList.toggle("selected", d.contains(r)));
+      }));
+    }
+
+    $$("input[name=kind]", m).forEach((r) => r.addEventListener("change", sync));
+    $("#system-refresh", m).addEventListener("click", loadSystem);
+    $("#scan-btn", m).addEventListener("click", safe(async () => {
+      const btn = $("#scan-btn", m);
+      const list = $("#scan-list", m);
+      btn.disabled = true;
+      list.innerHTML = `<p class="muted">Tarmoq tekshirilmoqda (bir necha soniya)...</p>`;
+      try {
+        const found = await api("GET", "/api/printers/scan");
+        list.innerHTML = found.map((d) => `
+          <button type="button" class="device" data-ip="${esc(d.address)}"><b>${esc(d.address)}</b><small>9100-port ochiq</small></button>`).join("")
+          || `<p class="muted">Tarmoqda printer topilmadi. Printer va kompyuter bitta Wi-Fi/tarmoqda ekanini tekshiring.</p>`;
+        $$("[data-ip]", list).forEach((b) => b.addEventListener("click", () => {
+          $("input[name=ip]", m).value = b.dataset.ip;
+          $$(".device", list).forEach((d) => d.classList.toggle("selected", d === b));
+        }));
+      } finally {
+        btn.disabled = false;
+      }
+    }));
     sync();
+    loadSystem();
+
     $("#f", m).addEventListener("submit", safe(async (e) => {
       e.preventDefault();
-      await api(p.id ? "PUT" : "POST", "/api/printers" + (p.id ? "/" + p.id : ""), formData(e.target));
+      const f = formData(e.target);
+      const data = { name: f.name, kind: kind(), width: f.width, port: f.port };
+      data.address = data.kind === "system" ? systemName : f.ip.trim();
+      if (!data.address) throw new Error(data.kind === "system" ? "Ro'yxatdan printerni tanlang" : "IP manzilni kiriting");
+      await api(p.id ? "PUT" : "POST", "/api/printers" + (p.id ? "/" + p.id : ""), data);
       closeModal();
       toast("Saqlandi");
       viewPrinters();
@@ -820,7 +971,7 @@ async function viewPrinters() {
 
   $("#add").addEventListener("click", () => form());
   $$("[data-edit]").forEach((b) => b.addEventListener("click", () =>
-    form(printers.find((p) => p.id === +b.dataset.edit))));
+    form((({ kind, ...rest }) => ({ ...rest, kind: kind === "windows" ? "system" : kind }))(printers.find((p) => p.id === +b.dataset.edit)))));
   $$("[data-test]").forEach((b) => b.addEventListener("click", safe(async () => {
     b.disabled = true;
     try {

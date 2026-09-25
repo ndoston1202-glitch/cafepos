@@ -4,17 +4,15 @@ Faqat Python standart kutubxonasi ishlatiladi (pip install shart emas).
 Ishga tushirish:  python server.py   ->  http://localhost:8000
 """
 
+import base64
 import hashlib
 import json
 import mimetypes
 import os
 import re
 import secrets
-import socket
 import sqlite3
-import subprocess
 import sys
-import tempfile
 import threading
 import webbrowser
 from datetime import datetime, timedelta
@@ -22,15 +20,22 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import printing
+from printing import PrintError
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+UPLOAD_DIR = os.environ.get("CAFEPOS_UPLOADS", os.path.join(BASE_DIR, "uploads"))
+MAX_BODY = 8 * 1024 * 1024
+MAX_IMAGE = 3 * 1024 * 1024
+IMAGE_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 DB_PATH = os.environ.get("CAFEPOS_DB", os.path.join(BASE_DIR, "cafepos.db"))
 PORT = int(os.environ.get("CAFEPOS_PORT", "8000"))
 SESSION_DAYS = 7
 
 ROLES = ("admin", "cashier", "waiter", "cook")
 PAYMENT_METHODS = ("cash", "card", "payme", "click")
-PRINTER_KINDS = ("network", "windows")
+PRINTER_KINDS = ("system", "network", "windows")  # windows = eski versiyadagi ulashilgan printer
 
 db_lock = threading.Lock()
 
@@ -123,6 +128,9 @@ CREATE INDEX IF NOT EXISTS idx_tickets_status ON kitchen_tickets(status);
 MIGRATIONS = [
     ("tables", "hall_id", "INTEGER REFERENCES halls(id)"),
     ("products", "printer_id", "INTEGER REFERENCES printers(id)"),
+    ("products", "cost", "INTEGER NOT NULL DEFAULT 0"),  # tannarx
+    ("products", "image", "TEXT"),
+    ("order_items", "cost", "INTEGER NOT NULL DEFAULT 0"),  # sotilgan paytdagi tannarx
     # Oshxona printeriga / ekraniga allaqachon yuborilgan miqdor
     ("order_items", "printed_qty", "INTEGER NOT NULL DEFAULT 0"),
     ("order_items", "kds_qty", "INTEGER NOT NULL DEFAULT 0"),
@@ -198,6 +206,13 @@ class ApiError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+class Deferred:
+    """Uzoq davom etadigan ish (tarmoqni qidirish) - baza qulfidan tashqarida bajariladi."""
+
+    def __init__(self, fn):
+        self.fn = fn
 
 
 def rows(cursor):
@@ -347,25 +362,61 @@ def product_values(data):
         data.get("category_id") or None,
         data["name"].strip(),
         to_int(data["price"], "price", 0),
+        to_int(data.get("cost") or 0, "cost", 0),
         data.get("printer_id") or None,
     )
+
+
+def remove_image_file(name):
+    if name:
+        path = os.path.join(UPLOAD_DIR, os.path.basename(name))
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+def save_product_image(conn, product_id, data):
+    """data["image"] = "data:image/jpeg;base64,..." (yangi rasm) yoki data["remove_image"] = true"""
+    old = conn.execute("SELECT image FROM products WHERE id = ?", (product_id,)).fetchone()
+    old = old["image"] if old else None
+    image = data.get("image")
+    if image:
+        m = re.fullmatch(r"data:(image/[a-z]+);base64,([A-Za-z0-9+/=\s]+)", image)
+        if not m or m.group(1) not in IMAGE_TYPES:
+            raise ApiError(400, "Rasm JPG, PNG yoki WEBP bo'lishi kerak")
+        try:
+            content = base64.b64decode(m.group(2), validate=False)
+        except ValueError:
+            raise ApiError(400, "Rasm buzilgan")
+        if len(content) > MAX_IMAGE:
+            raise ApiError(400, "Rasm hajmi 3 MB dan oshmasin")
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        name = f"p{product_id}_{secrets.token_hex(4)}.{IMAGE_TYPES[m.group(1)]}"
+        with open(os.path.join(UPLOAD_DIR, name), "wb") as f:
+            f.write(content)
+        conn.execute("UPDATE products SET image = ? WHERE id = ?", (name, product_id))
+        remove_image_file(old)
+    elif data.get("remove_image"):
+        conn.execute("UPDATE products SET image = NULL WHERE id = ?", (product_id,))
+        remove_image_file(old)
 
 
 @route("POST", "/api/products", ("admin",))
 def create_product(conn, user, params, data, query):
     cur = conn.execute(
-        "INSERT INTO products (category_id, name, price, printer_id) VALUES (?,?,?,?)",
+        "INSERT INTO products (category_id, name, price, cost, printer_id) VALUES (?,?,?,?,?)",
         product_values(data),
     )
+    save_product_image(conn, cur.lastrowid, data)
     return {"id": cur.lastrowid}
 
 
 @route("PUT", r"/api/products/(\d+)", ("admin",))
 def update_product(conn, user, params, data, query):
     conn.execute(
-        "UPDATE products SET category_id = ?, name = ?, price = ?, printer_id = ? WHERE id = ?",
+        "UPDATE products SET category_id = ?, name = ?, price = ?, cost = ?, printer_id = ? WHERE id = ?",
         (*product_values(data), params[0]),
     )
+    save_product_image(conn, params[0], data)
     return {"ok": True}
 
 
@@ -555,8 +606,8 @@ def add_item(conn, user, params, data, query):
         conn.execute("UPDATE order_items SET qty = qty + ? WHERE id = ?", (qty, existing["id"]))
     else:
         conn.execute(
-            "INSERT INTO order_items (order_id, product_id, name, price, qty) VALUES (?,?,?,?,?)",
-            (params[0], product["id"], product["name"], product["price"], qty),
+            "INSERT INTO order_items (order_id, product_id, name, price, cost, qty) VALUES (?,?,?,?,?,?)",
+            (params[0], product["id"], product["name"], product["price"], product["cost"], qty),
         )
     return order_detail(conn, params[0])
 
@@ -616,77 +667,25 @@ def cancel_order(conn, user, params, data, query):
     return {"ok": True}
 
 
-# --- printerlar (ESC/POS termoprinterlar)
-
-ESC_INIT = b"\x1b@"
-ESC_CP866 = b"\x1bt\x11"  # kirill harflari uchun kod sahifasi
-ESC_CENTER, ESC_LEFT = b"\x1ba\x01", b"\x1ba\x00"
-ESC_BOLD_ON, ESC_BOLD_OFF = b"\x1bE\x01", b"\x1bE\x00"
-GS_BIG, GS_NORMAL = b"\x1d!\x11", b"\x1d!\x00"
-GS_CUT = b"\n\n\n\n\x1dVB\x00"
-
-
-def esc_text(text):
-    for a, b in (("ʻ", "'"), ("ʼ", "'"), ("‘", "'"), ("’", "'"), ("—", "-"), ("№", "N")):
-        text = text.replace(a, b)
-    return text.encode("cp866", errors="replace")
-
-
-def kitchen_ticket_bytes(printer, order, lines):
-    width = 48 if printer["width"] >= 80 else 32
-    place = "OLIB KETISH" if order["type"] == "takeaway" else order["table_name"] or ""
-    out = [ESC_INIT, ESC_CP866, ESC_CENTER, ESC_BOLD_ON, esc_text(printer["name"].upper()), b"\n", ESC_BOLD_OFF]
-    out += [GS_BIG, esc_text(f"{place}  #{order['id']}"), b"\n", GS_NORMAL]
-    if order.get("hall_name"):
-        out += [ESC_BOLD_ON, esc_text(order["hall_name"]), b"\n", ESC_BOLD_OFF]
-    out += [esc_text(f"Ofitsiant: {order['waiter_name'] or '-'}"), b"\n"]
-    out += [esc_text(datetime.now().strftime("%d.%m.%Y %H:%M")), b"\n", ESC_LEFT, b"-" * width, b"\n"]
-    for line in lines:
-        if line["qty"] > 0:
-            text = f"{line['qty']} x {line['name']}"
-        else:
-            text = f"BEKOR: {-line['qty']} x {line['name']}"
-        out += [GS_BIG, esc_text(text), b"\n", GS_NORMAL]
-    out += [b"-" * width, b"\n", GS_CUT]
-    return b"".join(out)
+# --- printerlar (ESC/POS termoprinterlar, printing.py)
 
 
 def send_to_printer(printer, payload):
-    """Printerga xom ESC/POS ma'lumot yuboradi. Xato bo'lsa ApiError ko'taradi."""
-    if printer["kind"] == "network":
-        try:
-            with socket.create_connection((printer["address"], printer["port"]), timeout=5) as s:
-                s.sendall(payload)
-        except OSError as e:
-            raise ApiError(502, f"'{printer['name']}' printeriga ulanib bo'lmadi ({printer['address']}): {e}")
-        return
-    # Windows: ulashilgan (shared) printerga "copy /b" orqali xom ma'lumot
-    if os.name != "nt":
-        raise ApiError(400, "Windows printeri faqat Windows kompyuterda ishlaydi")
-    target = printer["address"]
-    if not target.startswith("\\\\"):
-        target = "\\\\localhost\\" + target
-    fd, path = tempfile.mkstemp(suffix=".bin")
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-        result = subprocess.run(
-            ["cmd", "/c", "copy", "/b", path, target],
-            capture_output=True, timeout=20,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except subprocess.TimeoutExpired:
-        raise ApiError(502, f"'{printer['name']}' printeri javob bermadi")
-    finally:
-        os.remove(path)
-    if result.returncode != 0:
-        raise ApiError(502, f"'{printer['name']}' printeriga chiqmadi ({target}). Printer ulashilganini tekshiring")
+        printing.send(printer, payload)
+    except PrintError as e:
+        raise ApiError(502, str(e))
+
+
+kitchen_ticket_bytes = printing.kitchen_ticket
 
 
 def printer_values(data):
-    require(data, "name", "kind", "address")
+    require(data, "name", "kind")
     if data["kind"] not in PRINTER_KINDS:
         raise ApiError(400, "Noto'g'ri printer turi")
+    if not data.get("address"):
+        raise ApiError(400, "Ro'yxatdan printerni tanlang" if data["kind"] == "system" else "Printer IP manzilini kiriting")
     width = to_int(data.get("width", 80), "width")
     return (
         data["name"].strip(),
@@ -725,6 +724,23 @@ def delete_printer(conn, user, params, data, query):
     conn.execute("UPDATE printers SET active = 0 WHERE id = ?", (params[0],))
     conn.execute("UPDATE products SET printer_id = NULL WHERE printer_id = ?", (params[0],))
     return {"ok": True}
+
+
+@route("GET", "/api/printers/system", ("admin",))
+def system_printers(conn, user, params, data, query):
+    # Printerlarni qidirish bazaga tegmaydi - qulfdan tashqarida bajariladi
+    def run():
+        try:
+            return printing.list_system_printers()
+        except (PrintError, OSError) as e:
+            raise ApiError(500, f"Printerlar ro'yxatini olib bo'lmadi: {e}")
+
+    return Deferred(run)
+
+
+@route("GET", "/api/printers/scan", ("admin",))
+def scan_printers(conn, user, params, data, query):
+    return Deferred(printing.scan_network)
 
 
 def get_printer(conn, printer_id):
@@ -860,6 +876,12 @@ def report(conn, user, params, data, query):
         ).fetchone()
     )
     summary["average"] = summary["revenue"] // summary["orders"] if summary["orders"] else 0
+    summary["cost"] = conn.execute(
+        f"""SELECT COALESCE(SUM(i.cost * i.qty), 0) FROM order_items i
+            JOIN orders o ON o.id = i.order_id WHERE {where}""",
+        rng,
+    ).fetchone()[0]
+    summary["profit"] = summary["revenue"] - summary["cost"]
     return {
         "from": date_from,
         "to": date_to,
@@ -873,9 +895,10 @@ def report(conn, user, params, data, query):
         ),
         "top_products": rows(
             conn.execute(
-                f"""SELECT i.name, SUM(i.qty) AS qty, SUM(i.qty * i.price) AS revenue
+                f"""SELECT i.name, SUM(i.qty) AS qty, SUM(i.qty * i.price) AS revenue,
+                           SUM(i.qty * (i.price - i.cost)) AS profit
                     FROM order_items i JOIN orders o ON o.id = i.order_id
-                    WHERE {where} GROUP BY i.name ORDER BY qty DESC LIMIT 10""",
+                    WHERE {where} AND i.qty > 0 GROUP BY i.name ORDER BY qty DESC LIMIT 10""",
                 rng,
             )
         ),
@@ -992,11 +1015,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_static(self, path):
-        if path == "/":
-            path = "/index.html"
-        full = os.path.realpath(os.path.join(STATIC_DIR, path.lstrip("/")))
-        if not full.startswith(os.path.realpath(STATIC_DIR) + os.sep) or not os.path.isfile(full):
-            full = os.path.join(STATIC_DIR, "index.html")
+        if path.startswith("/uploads/"):
+            full = os.path.join(os.path.realpath(UPLOAD_DIR), os.path.basename(path))
+            if not os.path.isfile(full):
+                return self.send_json(404, {"error": "Topilmadi"})
+        else:
+            if path == "/":
+                path = "/index.html"
+            full = os.path.realpath(os.path.join(STATIC_DIR, path.lstrip("/")))
+            if not full.startswith(os.path.realpath(STATIC_DIR) + os.sep) or not os.path.isfile(full):
+                full = os.path.join(STATIC_DIR, "index.html")
         with open(full, "rb") as f:
             body = f.read()
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
@@ -1031,6 +1059,8 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if not length:
             return {}
+        if length > MAX_BODY:
+            raise ApiError(413, "So'rov juda katta")
         try:
             data = json.loads(self.rfile.read(length).decode())
         except (ValueError, UnicodeDecodeError):
@@ -1058,6 +1088,8 @@ class Handler(BaseHTTPRequestHandler):
                     conn.rollback()
                     raise
             status, payload, headers = result
+            if isinstance(payload, Deferred):
+                payload = payload.fn()
             self.send_json(status, payload, headers)
         except ApiError as e:
             self.send_json(e.status, {"error": e.message})

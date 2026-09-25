@@ -35,7 +35,8 @@ Boshqa qurilmalardan (planshet, telefon) bir xil Wi-Fi tarmog'ida
 - 🍳 **Oshxona printeri** — har bir taom o'ziga biriktirilgan printerdan chiqadi (Oshxona, Salat, Bar...)
 - 🖥️ **Oshxona ekrani** — oshxona kompyuterida buyurtmalar ko'rinadi, yangi buyurtmada ovoz chiqadi
 - 📊 **Hisobot** — davr bo'yicha tushum, o'rtacha chek, to'lov turlari, ko'p sotilgan taomlar, ofitsiantlar
-- 🍽️ **Menyu** — kategoriya va taomlarni boshqarish
+- 🍽️ **Menyu** — taom nomi, tannarxi, sotish narxi, rasmi, kategoriyasi va printeri
+- 💹 **Foyda** — tannarx asosida hisobotda foyda ko'rinadi
 - 👥 **Xodimlar** — rollar va login
 
 ### Rollar
@@ -49,14 +50,14 @@ Boshqa qurilmalardan (planshet, telefon) bir xil Wi-Fi tarmog'ida
 
 ## 🍳 Oshxona printerlari
 
-1. **🖨️ Printerlar** bo'limida printer qo'shing:
-   - **Tarmoq (LAN) printeri** — printerning IP manzili (masalan `192.168.1.100`), port `9100`
-   - **USB printer** — Windows'da printerni ulashing: *Boshqaruv paneli → Qurilmalar va printerlar →
-     printer xususiyatlari → Kirish (Sharing) → "Bu printerni ulashish"*, qisqa nom bering (masalan `XP80`)
-     va shu nomni yozing
-2. **🧪 Sinov** tugmasi bilan tekshiring
-3. **🍽️ Menyu** bo'limida har bir taomga printer tanlang
-4. Buyurtmada **🖨️ Oshxona printeriga** bosing — har bir taom o'z printeridan chiqadi.
+1. Printerni kompyuterga **USB yoki Wi-Fi** orqali ulang va Windows'da drayverini o'rnating
+2. **🖨️ Printerlar → + Printer qo'shish**, nom bering (masalan *Oshxona*, *Salatxona*, *Bar*):
+   - **🔌 USB / Wi-Fi** — kompyuterga o'rnatilgan printerlar ro'yxati avtomatik chiqadi, keraklisini tanlang
+   - **🌐 Tarmoq (IP)** — drayversiz LAN/Wi-Fi termoprinter: IP manzilni yozing yoki
+     **🔍 Tarmoqdan qidirish** tugmasi bilan toping (9100-port)
+3. **🧪 Sinov** tugmasi bilan tekshiring
+4. **🍽️ Menyu**da taomga printer tanlang (ixtiyoriy): osh → Oshxona, salat → Salatxona, ichimlik → Bar
+5. Buyurtmada **🖨️ Oshxona printeriga** bosing — har bir taom o'z printeridan chiqadi.
    Faqat yangi qo'shilgan taomlar chiqadi; kamaytirilgan taom "BEKOR" bo'lib chiqadi.
 
 Printerlar dastur ishlayotgan (server) kompyuterga ulangan bo'lishi kerak.
@@ -70,7 +71,9 @@ Yuqoridagi ro'yxatdan bo'limni (masalan faqat "Oshxona" yoki "Bar") tanlash mumk
 ## 🛠️ Texnologiya
 
 - Backend: Python standart kutubxonasi (`http.server` + `sqlite3`) — `server.py`
+- Printerlar: `printing.py` (Windows `winspool`, CUPS, TCP 9100)
 - Frontend: oddiy HTML/CSS/JavaScript — `static/`
+- Taom rasmlari `uploads/` papkasida saqlanadi
 - Parollar PBKDF2 bilan xeshlanadi, sessiya HttpOnly cookie orqali
 
 ## 🧪 Testlar
