@@ -363,6 +363,62 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 403)
         self.admin.call("DELETE", f"/api/printers/{pr['id']}")
 
+    def test_service_charge(self):
+        _, halls = self.admin.call("GET", "/api/halls")
+        main = next(h for h in halls if h["name"] == "Asosiy zal")
+        cabins = next(h for h in halls if h["name"] == "Kabinalar")
+        _, tables = self.admin.call("GET", "/api/tables")
+        main_table = next(t for t in tables if t["hall_id"] == main["id"] and not t["order"])
+        cabin = next(t for t in tables if t["hall_id"] == cabins["id"] and not t["order"])
+        _, product = self.admin.call("POST", "/api/products", {"name": "Kabob", "price": 50000})
+
+        status, _ = self.cashier.call("PUT", "/api/settings", {"service_percent": 10})
+        self.assertEqual(status, 403)
+        status, _ = self.admin.call("PUT", "/api/settings", {"service_percent": 150})
+        self.assertEqual(status, 400)
+        _, settings = self.admin.call("PUT", "/api/settings", {"service_percent": "10", "cafe_name": "Test Kafe"})
+        self.assertEqual((settings["service_percent"], settings["cafe_name"]), (10, "Test Kafe"))
+        self.admin.call("PUT", f"/api/halls/{cabins['id']}", {"name": "Kabinalar", "sort": 2, "service_percent": 15})
+        try:
+            # Asosiy zal: umumiy 10%
+            _, o1 = self.waiter.call("POST", "/api/orders", {"type": "dine_in", "table_id": main_table["id"]})
+            _, o1 = self.waiter.call("POST", f"/api/orders/{o1['id']}/items", {"product_id": product["id"], "qty": 2})
+            self.assertEqual((o1["subtotal"], o1["service_percent"], o1["service"], o1["total"]), (100000, 10, 10000, 110000))
+
+            # Stol kartasi va kassa ro'yxatida ham xizmat haqi bilan
+            _, tables = self.admin.call("GET", "/api/tables")
+            self.assertEqual(next(t for t in tables if t["id"] == main_table["id"])["order"]["total"], 110000)
+            _, open_orders = self.cashier.call("GET", "/api/orders?status=open")
+            self.assertEqual(next(o for o in open_orders if o["id"] == o1["id"])["total"], 110000)
+
+            # Kabina: zal foizi 15%
+            _, o2 = self.waiter.call("POST", "/api/orders", {"type": "dine_in", "table_id": cabin["id"]})
+            _, o2 = self.waiter.call("POST", f"/api/orders/{o2['id']}/items", {"product_id": product["id"]})
+            self.assertEqual((o2["service"], o2["total"]), (7500, 57500))
+
+            # Olib ketish: xizmat haqi yo'q
+            _, o3 = self.admin.call("POST", "/api/orders", {"type": "takeaway"})
+            _, o3 = self.admin.call("POST", f"/api/orders/{o3['id']}/items", {"product_id": product["id"]})
+            self.assertEqual((o3["service"], o3["total"]), (0, 50000))
+
+            # To'lovda chegirma bilan; keyin foiz o'zgarsa ham yopilgan buyurtma o'zgarmaydi
+            _, before = self.admin.call("GET", "/api/reports")
+            _, paid = self.cashier.call("POST", f"/api/orders/{o1['id']}/pay", {"method": "cash", "discount": 5000})
+            self.assertEqual((paid["service"], paid["total"]), (10000, 105000))
+            self.admin.call("PUT", "/api/settings", {"service_percent": 20})
+            _, again = self.admin.call("GET", f"/api/orders/{o1['id']}")
+            self.assertEqual((again["service"], again["total"]), (10000, 105000))
+            _, after = self.admin.call("GET", "/api/reports")
+            self.assertEqual(after["summary"]["service"] - before["summary"]["service"], 10000)
+            self.assertEqual(after["summary"]["revenue"] - before["summary"]["revenue"], 105000)
+        finally:
+            self.admin.call("PUT", "/api/settings", {"service_percent": 0})
+            self.admin.call("PUT", f"/api/halls/{cabins['id']}", {"name": "Kabinalar", "sort": 2, "service_percent": ""})
+            # Ochiq qolgan buyurtmalar boshqa testlarga xalaqit bermasin
+            _, open_orders = self.admin.call("GET", "/api/orders?status=open")
+            for o in open_orders:
+                self.admin.call("POST", f"/api/orders/{o['id']}/cancel")
+
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})

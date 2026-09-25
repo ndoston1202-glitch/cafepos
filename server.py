@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS products (
     price INTEGER NOT NULL,
     active INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS halls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -127,6 +131,11 @@ CREATE INDEX IF NOT EXISTS idx_tickets_status ON kitchen_tickets(status);
 # Eski bazalarga yangi ustunlar qo'shiladi (ma'lumot o'chmaydi)
 MIGRATIONS = [
     ("tables", "hall_id", "INTEGER REFERENCES halls(id)"),
+    # Zal uchun alohida xizmat haqi foizi (NULL = umumiy sozlama)
+    ("halls", "service_percent", "REAL"),
+    # Yopilgan buyurtmaning xizmat haqi (to'lov paytida muzlatiladi)
+    ("orders", "service_percent", "REAL NOT NULL DEFAULT 0"),
+    ("orders", "service", "INTEGER NOT NULL DEFAULT 0"),
     ("products", "printer_id", "INTEGER REFERENCES printers(id)"),
     ("products", "cost", "INTEGER NOT NULL DEFAULT 0"),  # tannarx
     ("products", "image", "TEXT"),
@@ -235,6 +244,45 @@ def to_int(value, field, minimum=None):
     return n
 
 
+DEFAULT_SETTINGS = {"cafe_name": "CafePOS", "service_percent": "0"}
+
+
+def get_settings(conn):
+    settings = dict(DEFAULT_SETTINGS)
+    settings.update({r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")})
+    settings["service_percent"] = float(settings["service_percent"] or 0)
+    return settings
+
+
+def to_percent(value, field):
+    try:
+        n = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        raise ApiError(400, f"'{field}' son bo'lishi kerak")
+    if not 0 <= n <= 100:
+        raise ApiError(400, "Foiz 0 dan 100 gacha bo'lishi kerak")
+    return round(n, 2)
+
+
+def service_percent(conn, order_type, hall_id):
+    """Stolda o'tirganlar uchun xizmat haqi foizi: zalniki, bo'lmasa umumiy sozlama."""
+    if order_type != "dine_in":
+        return 0
+    if hall_id:
+        row = conn.execute("SELECT service_percent FROM halls WHERE id = ?", (hall_id,)).fetchone()
+        if row and row["service_percent"] is not None:
+            return row["service_percent"]
+    return get_settings(conn)["service_percent"]
+
+
+def apply_totals(order, percent):
+    """order["subtotal"] va order["discount"] asosida xizmat haqi va jami summani hisoblaydi."""
+    order["service_percent"] = percent
+    order["service"] = round(order["subtotal"] * percent / 100)
+    order["total"] = max(order["subtotal"] + order["service"] - order["discount"], 0)
+    return order
+
+
 def order_items_with_printer(conn, order_id):
     # printer_id taomning HOZIRGI printeridan olinadi (o'chirilgan printer hisobga olinmaydi)
     return rows(
@@ -250,7 +298,7 @@ def order_items_with_printer(conn, order_id):
 
 def order_detail(conn, order_id):
     order = conn.execute(
-        """SELECT o.*, t.name AS table_name, h.name AS hall_name, w.full_name AS waiter_name
+        """SELECT o.*, t.name AS table_name, t.hall_id, h.name AS hall_name, w.full_name AS waiter_name
            FROM orders o
            LEFT JOIN tables t ON t.id = o.table_id
            LEFT JOIN halls h ON h.id = t.hall_id
@@ -270,7 +318,7 @@ def order_detail(conn, order_id):
     )
     order["pending_kds"] = sum(abs(i["qty"] - i["kds_qty"]) for i in all_items)
     if order["status"] == "open":
-        order["total"] = max(order["subtotal"] - order["discount"], 0)
+        apply_totals(order, service_percent(conn, order["type"], order["hall_id"]))
     return order
 
 
@@ -427,6 +475,29 @@ def delete_product(conn, user, params, data, query):
     return {"ok": True}
 
 
+# --- sozlamalar
+
+
+@route("GET", "/api/settings")
+def read_settings(conn, user, params, data, query):
+    return get_settings(conn)
+
+
+@route("PUT", "/api/settings", ("admin",))
+def save_settings(conn, user, params, data, query):
+    values = {}
+    if "cafe_name" in data:
+        values["cafe_name"] = (data["cafe_name"] or "").strip() or DEFAULT_SETTINGS["cafe_name"]
+    if "service_percent" in data:
+        values["service_percent"] = str(to_percent(data["service_percent"] or 0, "service_percent"))
+    for key, value in values.items():
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+    return get_settings(conn)
+
+
 # --- zallar
 
 
@@ -440,22 +511,26 @@ def list_halls(conn, user, params, data, query):
     )
 
 
+def hall_values(data):
+    require(data, "name")
+    percent = data.get("service_percent")
+    percent = None if percent in (None, "") else to_percent(percent, "service_percent")
+    return data["name"].strip(), to_int(data.get("sort") or 0, "sort"), percent
+
+
 @route("POST", "/api/halls", ("admin",))
 def create_hall(conn, user, params, data, query):
-    require(data, "name")
     cur = conn.execute(
-        "INSERT INTO halls (name, sort) VALUES (?, ?)",
-        (data["name"].strip(), to_int(data.get("sort") or 0, "sort")),
+        "INSERT INTO halls (name, sort, service_percent) VALUES (?, ?, ?)", hall_values(data)
     )
     return {"id": cur.lastrowid}
 
 
 @route("PUT", r"/api/halls/(\d+)", ("admin",))
 def update_hall(conn, user, params, data, query):
-    require(data, "name")
     conn.execute(
-        "UPDATE halls SET name = ?, sort = ? WHERE id = ?",
-        (data["name"].strip(), to_int(data.get("sort") or 0, "sort"), params[0]),
+        "UPDATE halls SET name = ?, sort = ?, service_percent = ? WHERE id = ?",
+        (*hall_values(data), params[0]),
     )
     return {"ok": True}
 
@@ -495,7 +570,7 @@ def list_tables(conn, user, params, data, query):
     open_orders = {
         r["table_id"]: dict(r)
         for r in conn.execute(
-            """SELECT o.id, o.table_id, o.created_at, o.discount, u.full_name AS waiter_name,
+            """SELECT o.id, o.type, o.table_id, o.created_at, o.discount, u.full_name AS waiter_name,
                       COALESCE(SUM(i.price * i.qty), 0) AS subtotal
                FROM orders o
                LEFT JOIN order_items i ON i.order_id = o.id
@@ -506,6 +581,8 @@ def list_tables(conn, user, params, data, query):
     }
     for t in tables:
         t["order"] = open_orders.get(t["id"])
+        if t["order"]:
+            apply_totals(t["order"], service_percent(conn, "dine_in", t["hall_id"]))
     return tables
 
 
@@ -544,9 +621,9 @@ def delete_table(conn, user, params, data, query):
 @route("GET", "/api/orders")
 def list_orders(conn, user, params, data, query):
     status = query.get("status", ["open"])[0]
-    return rows(
+    orders = rows(
         conn.execute(
-            """SELECT o.*, t.name AS table_name, h.name AS hall_name, u.full_name AS waiter_name,
+            """SELECT o.*, t.name AS table_name, t.hall_id, h.name AS hall_name, u.full_name AS waiter_name,
                       COALESCE((SELECT SUM(price * qty) FROM order_items WHERE order_id = o.id), 0) AS subtotal
                FROM orders o
                LEFT JOIN tables t ON t.id = o.table_id
@@ -556,6 +633,10 @@ def list_orders(conn, user, params, data, query):
             (status,),
         )
     )
+    for o in orders:
+        if o["status"] == "open":
+            apply_totals(o, service_percent(conn, o["type"], o["hall_id"]))
+    return orders
 
 
 @route("POST", "/api/orders")
@@ -642,12 +723,14 @@ def pay_order(conn, user, params, data, query):
     if method not in PAYMENT_METHODS:
         raise ApiError(400, "To'lov turini tanlang")
     discount = to_int(data.get("discount", 0), "discount", 0)
-    if discount > order["subtotal"]:
+    if discount > order["subtotal"] + order["service"]:
         raise ApiError(400, "Chegirma summadan katta bo'lishi mumkin emas")
+    order["discount"] = discount
+    apply_totals(order, order["service_percent"])
     conn.execute(
-        """UPDATE orders SET status = 'paid', discount = ?, total = ?, payment_method = ?,
-                  cashier_id = ?, closed_at = ? WHERE id = ?""",
-        (discount, order["subtotal"] - discount, method, user["id"], now(), params[0]),
+        """UPDATE orders SET status = 'paid', discount = ?, service_percent = ?, service = ?, total = ?,
+                  payment_method = ?, cashier_id = ?, closed_at = ? WHERE id = ?""",
+        (discount, order["service_percent"], order["service"], order["total"], method, user["id"], now(), params[0]),
     )
     return order_detail(conn, params[0])
 
@@ -870,7 +953,7 @@ def report(conn, user, params, data, query):
     summary = dict(
         conn.execute(
             f"""SELECT COUNT(*) AS orders, COALESCE(SUM(total), 0) AS revenue,
-                       COALESCE(SUM(discount), 0) AS discount
+                       COALESCE(SUM(discount), 0) AS discount, COALESCE(SUM(service), 0) AS service
                 FROM orders o WHERE {where}""",
             rng,
         ).fetchone()
@@ -912,7 +995,7 @@ def report(conn, user, params, data, query):
         ),
         "orders": rows(
             conn.execute(
-                f"""SELECT o.id, o.type, o.total, o.discount, o.payment_method, o.closed_at,
+                f"""SELECT o.id, o.type, o.total, o.discount, o.service, o.payment_method, o.closed_at,
                            t.name AS table_name, h.name AS hall_name, u.full_name AS waiter_name
                     FROM orders o
                     LEFT JOIN tables t ON t.id = o.table_id

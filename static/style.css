@@ -285,6 +285,11 @@ label.file-btn { display: inline-block; margin: 0; }
 .device small { display: block; color: var(--muted); font-size: 12px; }
 .device.selected { border-color: var(--primary); background: #fbf5ee; }
 
+.totals .service { color: var(--primary); }
+.example { background: var(--bg); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.example:empty { display: none; }
+.settings h3 { margin-top: 20px; }
+
 /* --- jadval */
 table.list { width: 100%; border-collapse: collapse; }
 table.list th, table.list td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; }

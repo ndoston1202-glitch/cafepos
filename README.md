@@ -30,6 +30,7 @@ Boshqa qurilmalardan (planshet, telefon) bir xil Wi-Fi tarmog'ida
 - 🪑 **Stollar** — bo'sh/band holati, joriy summa; bosilganda buyurtma ochiladi
 - 🥡 **Olib ketish** buyurtmalari
 - 🧾 **Buyurtma** — kategoriya bo'yicha menyu, miqdorni +/− bilan o'zgartirish
+- 🧾 **Xizmat haqi** — stolda o'tirganlarga foiz (⚙️ Sozlamalar); har bir zal uchun alohida foiz qo'yish mumkin
 - 💰 **Kassa** — naqd / karta / Payme / Click, chegirma, qaytim hisoblash
 - 🖨️ **Chek** — 58/80 mm termoprinterga chop etish
 - 🍳 **Oshxona printeri** — har bir taom o'ziga biriktirilgan printerdan chiqadi (Oshxona, Salat, Bar...)

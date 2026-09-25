@@ -1,7 +1,7 @@
 // CafePOS - interfeys (kutubxonasiz, oddiy JavaScript)
 "use strict";
 
-const state = { user: null, categories: [], products: [] };
+const state = { user: null, categories: [], products: [], settings: { cafe_name: "CafePOS", service_percent: 0 } };
 
 const ROLE_NAMES = { admin: "Administrator", cashier: "Kassir", waiter: "Ofitsiant", cook: "Oshpaz" };
 const PRINTER_KINDS = {
@@ -20,6 +20,10 @@ function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
+}
+
+function percent(n) {
+  return (+n || 0).toLocaleString("ru-RU").replace(",", ".") + "%";
 }
 
 function money(n) {
@@ -151,6 +155,7 @@ function renderLogin() {
     e.preventDefault();
     try {
       state.user = await api("POST", "/api/login", formData(e.target));
+      await loadSettings();
       if (!location.hash || location.hash === "#/") location.hash = defaultRoute();
       router();
     } catch (err) {
@@ -174,7 +179,7 @@ function navItems() {
   const items = [["#/tables", "🪑 Stollar"]];
   if (can("admin", "cashier")) items.push(["#/cashier", "💰 Kassa"], ["#/kitchen", "🍳 Oshxona"], ["#/reports", "📊 Hisobot"]);
   if (can("admin")) items.push(
-    ["#/menu", "🍽️ Menyu"], ["#/tables-admin", "⚙️ Zallar va stollar"], ["#/printers", "🖨️ Printerlar"], ["#/users", "👥 Xodimlar"]);
+    ["#/menu", "🍽️ Menyu"], ["#/tables-admin", "🏛️ Zallar"], ["#/printers", "🖨️ Printerlar"], ["#/users", "👥 Xodimlar"], ["#/settings", "⚙️ Sozlamalar"]);
   return items;
 }
 
@@ -197,6 +202,12 @@ function layout(content) {
     <main id="view">${content}</main>`;
   $("#logout-btn").addEventListener("click", logout);
   return $("#view");
+}
+
+async function loadSettings() {
+  try {
+    state.settings = await api("GET", "/api/settings");
+  } catch { /* standart sozlamalar qoladi */ }
 }
 
 async function loadMenu() {
@@ -225,7 +236,7 @@ async function viewTables() {
       <div class="table-card ${o ? "busy" : ""}" data-id="${t.id}">
         <div class="name">${esc(t.name)}</div>
         <div class="muted">${o ? `Band · ${time(o.created_at)} · ${esc(o.waiter_name || "")}` : `Bo'sh · ${t.seats} o'rin`}</div>
-        ${o ? `<div class="sum">${money(Math.max(o.subtotal - o.discount, 0))}</div>` : ""}
+        ${o ? `<div class="sum">${money(o.total)}</div>` : ""}
       </div>`;
   };
   const busyCount = (list) => list.filter((t) => t.order).length;
@@ -334,8 +345,9 @@ async function viewOrder(id) {
           </div>`).join("") || `<p class="muted">Chap tomondan taom tanlang</p>`}
       </div>
       <div class="totals">
-        ${order.discount ? `<div><span>Summa</span><span>${money(order.subtotal)}</span></div>
-          <div><span>Chegirma</span><span>−${money(order.discount)}</span></div>` : ""}
+        ${order.service || order.discount ? `<div><span>Summa</span><span>${money(order.subtotal)}</span></div>` : ""}
+        ${order.service_percent ? `<div class="service"><span>Xizmat haqi (${percent(order.service_percent)})</span><span>+${money(order.service)}</span></div>` : ""}
+        ${order.discount ? `<div><span>Chegirma</span><span>−${money(order.discount)}</span></div>` : ""}
         <div class="grand"><span>Jami</span><span>${money(order.total)}</span></div>
         ${order.payment_method ? `<div class="muted"><span>To'lov</span><span>${METHOD_NAMES[order.payment_method]}</span></div>` : ""}
       </div>
@@ -418,7 +430,7 @@ function payModal(order, onPaid) {
       <button class="btn" data-close>Bekor</button>
       <button class="btn primary" id="confirm-pay">Tasdiqlash</button>
     </div>`, (modal) => {
-    const total = () => Math.max(order.subtotal - (+$("#discount", modal).value || 0), 0);
+    const total = () => Math.max(order.subtotal + order.service - (+$("#discount", modal).value || 0), 0);
     const update = () => {
       $("#to-pay", modal).textContent = money(total());
       $("#cash-box", modal).classList.toggle("hidden", method !== "cash");
@@ -450,7 +462,7 @@ function payModal(order, onPaid) {
 
 function printReceipt(order) {
   $("#print-area").innerHTML = `
-    <h3>☕ CafePOS</h3>
+    <h3>${esc(state.settings.cafe_name)}</h3>
     <div class="c">Buyurtma #${order.id} · ${esc(place(order))}</div>
     <div class="c">${esc(order.closed_at || order.created_at)}</div>
     <div class="c">Ofitsiant: ${esc(order.waiter_name || "-")}</div>
@@ -462,8 +474,9 @@ function printReceipt(order) {
     </table>
     <hr>
     <table>
-      ${order.discount ? `<tr><td>Summa</td><td style="text-align:right">${money(order.subtotal)}</td></tr>
-        <tr><td>Chegirma</td><td style="text-align:right">-${money(order.discount)}</td></tr>` : ""}
+      ${order.service || order.discount ? `<tr><td>Summa</td><td style="text-align:right">${money(order.subtotal)}</td></tr>` : ""}
+      ${order.service ? `<tr><td>Xizmat haqi ${percent(order.service_percent)}</td><td style="text-align:right">+${money(order.service)}</td></tr>` : ""}
+      ${order.discount ? `<tr><td>Chegirma</td><td style="text-align:right">-${money(order.discount)}</td></tr>` : ""}
       <tr><td><b>JAMI</b></td><td style="text-align:right"><b>${money(order.total)}</b></td></tr>
       ${order.payment_method ? `<tr><td>To'lov</td><td style="text-align:right">${METHOD_NAMES[order.payment_method]}</td></tr>` : ""}
     </table>
@@ -488,7 +501,7 @@ async function viewCashier() {
               <td>${esc(place(o))}</td>
               <td>${esc(o.waiter_name || "-")}</td>
               <td>${time(o.created_at)}</td>
-              <td class="right"><b>${money(Math.max(o.subtotal - o.discount, 0))}</b></td>
+              <td class="right"><b>${money(o.total)}</b></td>
             </tr>`).join("") || `<tr><td colspan="5" class="muted">Ochiq buyurtmalar yo'q</td></tr>`}
         </tbody>
       </table>
@@ -520,6 +533,7 @@ async function viewReports() {
       <div class="stat"><div class="label">O'rtacha chek</div><div class="value">${money(r.summary.average)}</div></div>
       <div class="stat"><div class="label">Tannarx</div><div class="value">${money(r.summary.cost)}</div></div>
       <div class="stat"><div class="label">Foyda</div><div class="value profit">${money(r.summary.profit)}</div></div>
+      <div class="stat"><div class="label">Xizmat haqi</div><div class="value">${money(r.summary.service)}</div></div>
       <div class="stat"><div class="label">Chegirmalar</div><div class="value">${money(r.summary.discount)}</div></div>
     </div>
     <div class="report-grid">
@@ -727,7 +741,8 @@ async function viewTablesAdmin() {
         <p class="muted">Masalan: Asosiy zal, Banket zali, Kabinalar, Yozgi terassa</p>
         <table class="list">
           ${halls.map((h) => `
-            <tr><td><b>${esc(h.name)}</b><div class="muted">${h.tables} ta stol</div></td>
+            <tr><td><b>${esc(h.name)}</b><div class="muted">${h.tables} ta stol ·
+              xizmat haqi ${h.service_percent === null ? `${percent(state.settings.service_percent)} (umumiy)` : percent(h.service_percent)}</div></td>
               <td class="right" style="white-space:nowrap">
                 <button class="btn small" data-edit-hall="${h.id}">✏️</button>
                 <button class="btn small danger" data-del-hall="${h.id}">🗑</button>
@@ -754,6 +769,9 @@ async function viewTablesAdmin() {
   const hallForm = (h = {}) => openModal(`
     <form id="f"><h2>${h.id ? "Zalni tahrirlash" : "Yangi zal"}</h2>
       <label><span>Nomi</span><input name="name" value="${esc(h.name || "")}" placeholder="Banket zali" required></label>
+      <label><span>Xizmat haqi, % <i>(bo'sh qoldirilsa umumiy: ${percent(state.settings.service_percent)})</i></span>
+        <input name="service_percent" type="number" min="0" max="100" step="0.5"
+          value="${h.service_percent ?? ""}" placeholder="${state.settings.service_percent}"></label>
       <label><span>Tartib raqami</span><input name="sort" type="number" value="${h.sort ?? halls.length}"></label>
       <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
     </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
@@ -1077,6 +1095,47 @@ async function viewKitchen() {
   refresh();
 }
 
+// ------------------------------------------------------------ sozlamalar (admin)
+
+async function viewSettings() {
+  await loadSettings();
+  const halls = await api("GET", "/api/halls");
+  const s = state.settings;
+  layout(`
+    <form class="panel settings" id="f" style="max-width:640px">
+      <h2>⚙️ Sozlamalar</h2>
+      <label><span>Kafe nomi (chekda chiqadi)</span><input name="cafe_name" value="${esc(s.cafe_name)}" required></label>
+      <label><span>Xizmat haqi, % — stolda o'tirganlarga umumiy summadan qo'shiladi</span>
+        <input name="service_percent" type="number" min="0" max="100" step="0.5" value="${s.service_percent}"></label>
+      <p class="muted">Olib ketish buyurtmalariga xizmat haqi qo'shilmaydi. 0 qo'yilsa xizmat haqi olinmaydi.</p>
+      <div id="example" class="example"></div>
+      ${halls.length ? `
+        <h3>Zallar bo'yicha</h3>
+        <table class="list">
+          ${halls.map((h) => `<tr><td>${esc(h.name)}</td><td class="right">${h.service_percent === null
+            ? `<span class="muted">umumiy</span>` : percent(h.service_percent)}</td></tr>`).join("")}
+        </table>
+        <p class="muted">Kabina yoki banket zali uchun boshqa foiz kerak bo'lsa, "🏛️ Zallar va stollar" bo'limida zalni tahrirlang.</p>` : ""}
+      <div class="actions"><button class="btn primary">Saqlash</button></div>
+    </form>`);
+
+  const input = $("input[name=service_percent]");
+  const example = () => {
+    const p = +input.value || 0;
+    $("#example").innerHTML = p
+      ? `Misol: buyurtma ${money(100000)} → xizmat haqi <b>${money(100000 * p / 100)}</b> → jami <b>${money(100000 + 100000 * p / 100)}</b>`
+      : "";
+  };
+  input.addEventListener("input", example);
+  example();
+  $("#f").addEventListener("submit", safe(async (e) => {
+    e.preventDefault();
+    state.settings = await api("PUT", "/api/settings", formData(e.target));
+    toast("Saqlandi ✅");
+    viewSettings();
+  }));
+}
+
 // ------------------------------------------------------------ router
 
 const routes = [
@@ -1089,6 +1148,7 @@ const routes = [
   [/^#\/menu$/, viewMenu, ["admin"]],
   [/^#\/tables-admin$/, viewTablesAdmin, ["admin"]],
   [/^#\/users$/, viewUsers, ["admin"]],
+  [/^#\/settings$/, viewSettings, ["admin"]],
 ];
 
 async function router() {
@@ -1114,6 +1174,7 @@ window.addEventListener("hashchange", router);
 (async function start() {
   try {
     state.user = await api("GET", "/api/me");
+    await loadSettings();
   } catch {
     state.user = null;
   }
