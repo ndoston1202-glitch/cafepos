@@ -1,0 +1,4 @@
+cafepos.db
+cafepos.db-*
+__pycache__/
+*.pyc
