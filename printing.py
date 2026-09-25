@@ -236,6 +236,18 @@ def _cups_printers():
     return result
 
 
+def primary_ip():
+    """Internetga (routerga) chiqadigan asosiy tarmoq kartasining IP manzili."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))  # paket yuborilmaydi, faqat mahalliy IP aniqlanadi
+        ip = s.getsockname()[0]
+        s.close()
+        return None if ip.startswith(("127.", "0.")) else ip
+    except OSError:
+        return None
+
+
 def local_networks():
     ips = set()
     try:

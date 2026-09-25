@@ -1154,14 +1154,17 @@ def delete_user(conn, user, params, data, query):
 
 
 def lan_urls():
+    """Asosiy (Wi-Fi/LAN) manzil birinchi; qolganlari - VPN, VirtualBox kabi virtual adapterlar."""
+    main = printing.primary_ip()
     _, ips = printing.local_networks()
-    ips = sorted(ip for ip in ips if not ip.startswith(("127.", "169.254.")))
-    return [f"http://{ip}:{PORT}" for ip in ips]
+    others = sorted(ip for ip in ips if ip != main and not ip.startswith(("127.", "169.254.")))
+    return [f"http://{ip}:{PORT}" for ip in ([main] if main else []) + others]
 
 
 @route("GET", "/api/network")
 def network_info(conn, user, params, data, query):
-    return {"port": PORT, "urls": lan_urls()}
+    urls = lan_urls()
+    return {"port": PORT, "main": urls[0] if urls else None, "others": urls[1:]}
 
 
 # ---------------------------------------------------------------- HTTP
@@ -1344,8 +1347,11 @@ def main():
     url = f"http://localhost:{PORT}"
     print("=" * 50)
     print(f"  CafePOS ishga tushdi: {url}")
-    for lan in lan_urls():
-        print(f"  Telefon/planshetdan (shu Wi-Fi): {lan}")
+    lans = lan_urls()
+    if lans:
+        print(f"  Telefon/planshetdan (shu Wi-Fi): {lans[0]}")
+    for lan in lans[1:]:
+        print(f"    boshqa adapter (odatda kerak emas): {lan}")
     print("  Login: admin   Parol: admin123")
     print("  To'xtatish uchun shu oynani yoping (yoki Ctrl+C)")
     print("=" * 50)

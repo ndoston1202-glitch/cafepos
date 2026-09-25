@@ -506,6 +506,10 @@ tr.inactive td { opacity: .5; }
 /* --- tarmoq */
 .network-panel { margin-top: 16px; }
 .lan-url { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.help-list { padding-left: 20px; line-height: 1.55; }
+.network-panel h4 { margin: 14px 0 4px; }
+.network-panel details { margin: 6px 0; }
+.network-panel details code { font-size: 13px; }
 .lan-url code { font-size: 18px; font-weight: 700; background: var(--bg); padding: 8px 12px; border-radius: 8px; color: var(--primary); }
 
 /* --- jadval */

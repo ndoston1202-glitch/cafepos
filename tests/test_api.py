@@ -469,7 +469,11 @@ class ApiTest(unittest.TestCase):
     def test_network_info(self):
         status, info = self.waiter.call("GET", "/api/network")
         self.assertEqual(status, 200)
-        self.assertIn("urls", info)
+        self.assertIn("main", info)
+        self.assertIsInstance(info["others"], list)
+        if info["main"]:
+            self.assertTrue(info["main"].startswith("http://"))
+            self.assertNotIn(info["main"], info["others"])
 
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")

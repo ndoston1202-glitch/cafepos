@@ -1313,11 +1313,19 @@ async function viewSettings() {
     <div class="panel network-panel" style="max-width:640px">
       <h3>📶 Telefon, planshet va boshqa kompyuterlardan kirish</h3>
       <p class="muted">Qurilma shu kompyuter bilan <b>bitta Wi-Fi / tarmoqda</b> bo'lsin. Brauzerda quyidagi manzilni oching:</p>
-      ${network.urls.map((u) => `<div class="lan-url"><code>${esc(u)}</code>
-        <button type="button" class="btn small" data-copy="${esc(u)}">Nusxa olish</button></div>`).join("")
-        || `<p class="error">Kompyuter tarmoqqa ulanmagan ko'rinadi.</p>`}
-      <p class="muted">Ochilmasa: dastur papkasidagi <b>TARMOQQA_RUXSAT.bat</b> faylini bir marta ishga tushiring
-        (Windows fayervolida ${network.port}-portni ochadi).</p>
+      ${network.main ? `<div class="lan-url"><code>${esc(network.main)}</code>
+        <button type="button" class="btn small" data-copy="${esc(network.main)}">Nusxa olish</button></div>`
+        : `<p class="error">Kompyuter Wi-Fi yoki tarmoqqa ulanmagan ko'rinadi.</p>`}
+      ${network.others.length ? `<details class="muted"><summary>Boshqa manzillar (VPN, virtual adapterlar — odatda kerak emas)</summary>
+        ${network.others.map((u) => `<div><code>${esc(u)}</code></div>`).join("")}</details>` : ""}
+      <h4>Ochilmasa:</h4>
+      <ol class="muted help-list">
+        <li>Dastur papkasidagi <b>TARMOQQA_RUXSAT.bat</b> ni ishga tushiring va administrator ruxsatiga <b>"Да"</b> bosing.
+          U fayervolda ${network.port}-portni ochadi va Python uchun qo'yilgan taqiqni olib tashlaydi.</li>
+        <li>Telefonda <b>mobil internet emas, Wi-Fi</b> yoqilganini va aynan shu Wi-Fi'ga ulanganini tekshiring.</li>
+        <li>Mehmonlar (Guest) Wi-Fi'da qurilmalar bir-birini ko'rmaydi — asosiy Wi-Fi'ga ulaning.</li>
+        <li>Manzil boshida <b>http://</b> bo'lsin (https emas) va oxirida <b>:${network.port}</b> bo'lsin.</li>
+      </ol>
     </div>`);
 
   $$("[data-copy]").forEach((b) => b.addEventListener("click", async () => {

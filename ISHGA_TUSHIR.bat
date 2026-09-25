@@ -11,6 +11,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem Telefon/planshetdan kirish uchun fayervol ruxsati (bir marta so'raladi)
+netsh advfirewall firewall show rule name="CafePOS" >nul 2>&1
+if errorlevel 1 (
+    echo Telefon va planshetlar ulanishi uchun Windows ruxsat so'raydi - "Da / Yes" ni bosing.
+    call "%~dp0TARMOQQA_RUXSAT.bat"
+)
+
 python server.py
 echo.
 echo Server to'xtadi. Yuqoridagi xabarni o'qing.
