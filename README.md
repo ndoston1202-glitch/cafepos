@@ -5,23 +5,28 @@ Ma'lumotlar shu papkadagi `cafepos.db` (SQLite) faylida saqlanadi.
 
 ## 🚀 Ishga tushirish
 
+CafePOS kompyuterda **alohida oynada** (desktop dastur kabi) ochiladi — manzil qatori va tablarsiz.
+Server qora oynasiz orqa fonda ishlaydi.
+
 | Fayl | Vazifasi |
 |------|----------|
-| **ISHGA_TUSHIR.bat** | Dasturni yoqadi, brauzer o'zi ochiladi |
-| **YANGILASH.bat** | GitHub'dan yangi versiyani oladi |
+| **ORNATISH.bat** | Bir marta: ish stoli va Pusk menyusiga "CafePOS" yorlig'ini qo'shadi |
+| **ISHGA_TUSHIR.bat** | Dasturni ochadi (yorliq bilan bir xil) |
+| **TOXTATISH.bat** | Orqa fondagi serverni to'xtatadi |
+| **YANGILASH.bat** | GitHub'dan yangi versiyani oladi va dasturni qayta ochadi |
 | **TARMOQQA_RUXSAT.bat** | Telefon/planshetdan kirish uchun fayervolda ruxsat (bir marta) |
 
-To'xtatish uchun qora oynani yoping.
+Oynani yopish serverni to'xtatmaydi — telefon va planshetlar ishlashda davom etadi.
+Xatolar `cafepos.log` fayliga yoziladi.
 
 ### Birinchi marta
 1. **Python 3.8+** o'rnating: https://www.python.org/downloads/ ("Add Python to PATH" ni belgilang)
-2. **ISHGA_TUSHIR.bat** ga ikki marta bosing
-3. Brauzerda `http://localhost:8000` ochiladi
+2. **ORNATISH.bat** ga ikki marta bosing
+3. Ish stolidagi **CafePOS** ikonkasini oching
 
 Login: **admin** · Parol: **admin123** — kirgandan keyin *Xodimlar* bo'limida parolni o'zgartiring.
 
-Linux/macOS: `python3 server.py`
-
+Linux/macOS: `python3 desktop.py` (yoki faqat server: `python3 server.py`)
 
 ## ✨ Imkoniyatlar
 
@@ -85,6 +90,7 @@ Yuqoridagi ro'yxatdan bo'limni (masalan faqat "Oshxona" yoki "Bar") tanlash mumk
 ## 🛠️ Texnologiya
 
 - Backend: Python standart kutubxonasi (`http.server` + `sqlite3`) — `server.py`
+- Desktop oyna: `desktop.py` (Chrome/Edge ilova rejimi `--app`)
 - Printerlar: `printing.py` (Windows `winspool`, CUPS, TCP 9100)
 - Frontend: oddiy HTML/CSS/JavaScript — `static/`
 - Taom rasmlari `uploads/` papkasida saqlanadi

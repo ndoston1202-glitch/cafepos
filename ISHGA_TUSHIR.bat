@@ -18,7 +18,10 @@ if errorlevel 1 (
     call "%~dp0TARMOQQA_RUXSAT.bat"
 )
 
-python server.py
-echo.
-echo Server to'xtadi. Yuqoridagi xabarni o'qing.
-pause
+rem CafePOS alohida oynada (desktop) ochiladi, server qora oynasiz orqa fonda ishlaydi
+where pythonw >nul 2>nul
+if errorlevel 1 (
+    start "" python "%~dp0desktop.py"
+) else (
+    start "" pythonw "%~dp0desktop.py"
+)

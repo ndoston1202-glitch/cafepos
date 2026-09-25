@@ -3,3 +3,5 @@ cafepos.db-*
 __pycache__/
 *.pyc
 uploads/
+cafepos.pid
+cafepos.log

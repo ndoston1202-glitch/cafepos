@@ -4,6 +4,7 @@ Faqat Python standart kutubxonasi ishlatiladi (pip install shart emas).
 Ishga tushirish:  python server.py   ->  http://localhost:8000
 """
 
+import atexit
 import base64
 import hashlib
 import json
@@ -1345,6 +1346,11 @@ def main():
         print(f"Brauzerda oching: http://localhost:{PORT}")
         sys.exit(1)
     url = f"http://localhost:{PORT}"
+    # TOXTATISH.bat serverni shu raqam orqali to'xtatadi
+    pid_path = os.path.join(BASE_DIR, "cafepos.pid")
+    with open(pid_path, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(lambda: os.path.exists(pid_path) and os.remove(pid_path))
     print("=" * 50)
     print(f"  CafePOS ishga tushdi: {url}")
     lans = lan_urls()
@@ -1353,10 +1359,11 @@ def main():
     for lan in lans[1:]:
         print(f"    boshqa adapter (odatda kerak emas): {lan}")
     print("  Login: admin   Parol: admin123")
-    print("  To'xtatish uchun shu oynani yoping (yoki Ctrl+C)")
+    print("  To'xtatish: TOXTATISH.bat (yoki shu oynada Ctrl+C)")
     print("=" * 50)
     if "--no-browser" not in sys.argv:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    sys.stdout.flush()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
