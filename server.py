@@ -864,11 +864,12 @@ def kitchen_print(conn, user, params, data, query):
     order = open_order(conn, params[0])
     items = order_items_with_printer(conn, params[0])
     groups = pending_lines(items, "printed_qty", only_with_printer=True)
-    if not groups:
-        if any(i["qty"] != i["printed_qty"] for i in items):
-            raise ApiError(400, "Bu taomlarga printer tanlanmagan. Menyu bo'limida printer biriktiring")
-        raise ApiError(400, "Oshxonaga yuboriladigan yangi taom yo'q")
     printed, errors = [], []
+    if not groups:
+        # Printer biriktirilmagan yoki yangi taom yo'q - xato emas, hech narsa chop etilmaydi
+        result = order_detail(conn, params[0])
+        result["printed"], result["errors"] = printed, errors
+        return result
     for printer_id, lines in groups.items():
         printer = get_printer(conn, printer_id)
         try:

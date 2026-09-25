@@ -359,7 +359,7 @@ async function viewOrder(id) {
         </div>
         ${open ? `
         <div class="kitchen-actions">
-          <button class="btn kitchen" id="kitchen-print-btn" ${order.pending_print ? "" : "disabled"}>
+          <button class="btn kitchen" id="kitchen-print-btn" ${order.items.length ? "" : "disabled"}>
             🖨️ Oshxona printeriga${order.pending_print ? ` <span class="count">${order.pending_print}</span>` : ""}
           </button>
           <button class="btn kitchen" id="kitchen-send-btn" ${order.pending_kds ? "" : "disabled"}>
@@ -384,11 +384,16 @@ async function viewOrder(id) {
       kitchenPrintBtn.disabled = true;
       try {
         order = await api("POST", `/api/orders/${order.id}/kitchen-print`);
-        toast("Chiqarildi: " + order.printed.join(", "));
-        if (order.errors.length) setTimeout(() => toast(order.errors.join("; "), true), 2600);
       } finally {
         renderCart();
       }
+      // Printer ishlamasa - buyurtmada qolamiz, qayta urinish mumkin
+      if (order.errors.length) {
+        toast((order.printed.length ? "Chiqarildi: " + order.printed.join(", ") + ". " : "") + order.errors.join("; "), true);
+        return;
+      }
+      if (order.printed.length) toast("Chiqarildi: " + order.printed.join(", ") + " ✅");
+      location.hash = "#/tables";
     }));
     const kitchenSendBtn = $("#kitchen-send-btn");
     if (kitchenSendBtn) kitchenSendBtn.addEventListener("click", safe(async () => {

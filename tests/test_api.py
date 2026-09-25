@@ -250,8 +250,8 @@ class ApiTest(unittest.TestCase):
             self.assertIn(b"BEKOR: 1 x Manti", received[1])
             self.assertEqual(res["pending_print"], 0)
 
-            status, _ = self.admin.call("POST", f"/api/orders/{order['id']}/kitchen-print")
-            self.assertEqual(status, 400)  # yangi narsa yo'q
+            status, res = self.admin.call("POST", f"/api/orders/{order['id']}/kitchen-print")
+            self.assertEqual((status, res["printed"], res["errors"]), (200, [], []))  # yangi narsa yo'q - xatosiz
         finally:
             listener.close()
 

@@ -64,8 +64,11 @@ def send(printer, payload):
         try:
             with socket.create_connection((printer["address"], printer["port"]), timeout=5) as s:
                 s.sendall(payload)
-        except OSError as e:
-            raise PrintError(f"'{printer['name']}' printeriga ulanib bo'lmadi ({printer['address']}): {e}")
+        except OSError:
+            raise PrintError(
+                f"'{printer['name']}' printeriga ulanib bo'lmadi ({printer['address']}). "
+                "Printer yoqilgan va tarmoqqa ulanganini tekshiring"
+            )
     elif kind == "system":
         if os.name == "nt":
             _windows_raw_print(printer["address"], payload)
