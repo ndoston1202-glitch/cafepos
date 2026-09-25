@@ -174,13 +174,38 @@ async function logout() {
 
 // ------------------------------------------------------------ layout
 
-function navItems() {
-  if (can("cook")) return [["#/kitchen", "🍳 Oshxona"]];
-  const items = [["#/tables", "🪑 Stollar"]];
-  if (can("admin", "cashier")) items.push(["#/cashier", "💰 Kassa"], ["#/kitchen", "🍳 Oshxona"], ["#/reports", "📊 Hisobot"]);
-  if (can("admin")) items.push(
-    ["#/menu", "🍽️ Menyu"], ["#/tables-admin", "🏛️ Zallar"], ["#/printers", "🖨️ Printerlar"], ["#/users", "👥 Xodimlar"], ["#/settings", "⚙️ Sozlamalar"]);
-  return items;
+// Chiziqli ikonkalar (24x24, rang - currentColor)
+const ICONS = {
+  logo: '<path d="M10 2v2M14 2v2M6 2v2"/><path d="M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/>',
+  tables: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  cashier: '<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>',
+  kitchen: '<path d="M17 21a1 1 0 0 0 1-1v-5.35c0-.46.32-.84.73-1.04a4 4 0 0 0-2.14-7.59 5 5 0 0 0-9.18 0 4 4 0 0 0-2.14 7.59c.41.2.73.58.73 1.04V20a1 1 0 0 0 1 1Z"/><path d="M6 17h12"/>',
+  reports: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9M13 17V5M8 17v-3"/>',
+  menu: '<path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2M7 2v20"/><path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"/>',
+  halls: '<path d="M3 21h18M5 21V8l7-5 7 5v13"/><path d="M9 21v-6h6v6"/>',
+  printer: '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6"/><rect x="6" y="14" width="12" height="8" rx="1"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+  settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/>',
+  burger: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+};
+
+function icon(name) {
+  return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+}
+
+// [guruh nomi, [[havola, ikonka, nomi], ...]]
+function navGroups() {
+  if (can("cook")) return [["Ish", [["#/kitchen", "kitchen", "Oshxona"]]]];
+  const main = [["#/tables", "tables", "Stollar"]];
+  if (can("admin", "cashier")) main.push(["#/cashier", "cashier", "Kassa"], ["#/kitchen", "kitchen", "Oshxona"], ["#/reports", "reports", "Hisobot"]);
+  const groups = [["Ish", main]];
+  if (can("admin")) groups.push(["Boshqaruv", [
+    ["#/menu", "menu", "Menyu"], ["#/tables-admin", "halls", "Zallar"], ["#/printers", "printer", "Printerlar"],
+    ["#/users", "users", "Xodimlar"], ["#/settings", "settings", "Sozlamalar"],
+  ]]);
+  return groups;
 }
 
 function defaultRoute() {
@@ -189,18 +214,45 @@ function defaultRoute() {
 
 function layout(content) {
   const hash = location.hash.split("?")[0];
+  const isActive = (href) => hash === href || (href === "#/tables" && hash.startsWith("#/order/"));
+  const initials = state.user.full_name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
   $("#app").innerHTML = `
-    <header class="topbar">
-      <div class="brand">☕ CafePOS</div>
-      <nav>${navItems().map(([href, name]) =>
-        `<a href="${href}" class="${hash === href || (href === "#/tables" && hash.startsWith("#/order/")) ? "active" : ""}">${name}</a>`).join("")}</nav>
-      <div class="user">
-        <span>${esc(state.user.full_name)} <span class="muted">· ${ROLE_NAMES[state.user.role]}</span></span>
-        <button class="btn small" id="logout-btn">Chiqish</button>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-logo">${icon("logo")}</span>
+          <span class="brand-name">${esc(state.settings.cafe_name)}</span>
+        </div>
+        <nav class="side-nav">
+          ${navGroups().map(([title, items]) => `
+            <div class="nav-group">${esc(title)}</div>
+            ${items.map(([href, ic, name]) => `
+              <a href="${href}" class="${isActive(href) ? "active" : ""}" title="${name}">
+                ${icon(ic)}<span>${name}</span>
+              </a>`).join("")}`).join("")}
+        </nav>
+        <div class="side-user">
+          <div class="avatar">${esc(initials)}</div>
+          <div class="who">
+            <b>${esc(state.user.full_name)}</b>
+            <small>${ROLE_NAMES[state.user.role]}</small>
+          </div>
+          <button class="logout" id="logout-btn" title="Chiqish">${icon("logout")}</button>
+        </div>
+      </aside>
+      <div class="side-backdrop" id="side-backdrop"></div>
+      <div class="content">
+        <header class="mobile-bar">
+          <button class="burger" id="burger" aria-label="Menyu">${icon("burger")}</button>
+          <span class="brand-name">${esc(state.settings.cafe_name)}</span>
+        </header>
+        <main id="view">${content}</main>
       </div>
-    </header>
-    <main id="view">${content}</main>`;
+    </div>`;
   $("#logout-btn").addEventListener("click", logout);
+  $("#burger").addEventListener("click", () => document.body.classList.toggle("nav-open"));
+  $("#side-backdrop").addEventListener("click", () => document.body.classList.remove("nav-open"));
+  document.body.classList.remove("nav-open");
   return $("#view");
 }
 
