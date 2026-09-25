@@ -34,6 +34,14 @@ PORT = int(os.environ.get("CAFEPOS_PORT", "8000"))
 SESSION_DAYS = 7
 
 ROLES = ("admin", "cashier", "waiter", "cook")
+# Bo'limlarga kirish ruxsatlari
+PERMISSIONS = ("tables", "cashier", "kitchen", "reports", "menu", "halls", "printers", "users", "settings")
+ROLE_DEFAULTS = {
+    "admin": PERMISSIONS,
+    "cashier": ("tables", "cashier", "kitchen", "reports"),
+    "waiter": ("tables",),
+    "cook": ("kitchen",),
+}
 PAYMENT_METHODS = ("cash", "card", "payme", "click")
 PRINTER_KINDS = ("system", "network", "windows")  # windows = eski versiyadagi ulashilgan printer
 
@@ -136,6 +144,11 @@ MIGRATIONS = [
     # Yopilgan buyurtmaning xizmat haqi (to'lov paytida muzlatiladi)
     ("orders", "service_percent", "REAL NOT NULL DEFAULT 0"),
     ("orders", "service", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "first_name", "TEXT"),
+    ("users", "last_name", "TEXT"),
+    ("users", "phone", "TEXT"),
+    # JSON ro'yxat; NULL = rol bo'yicha standart ruxsatlar
+    ("users", "permissions", "TEXT"),
     ("products", "printer_id", "INTEGER REFERENCES printers(id)"),
     ("products", "cost", "INTEGER NOT NULL DEFAULT 0"),  # tannarx
     ("products", "image", "TEXT"),
@@ -336,9 +349,10 @@ def open_order(conn, order_id):
 ROUTES = []
 
 
-def route(method, pattern, roles=None):
+def route(method, pattern, perms=None):
+    """perms - shu ruxsatlardan birortasi bo'lsa kirish mumkin (None = tizimga kirgan hamma)."""
     def wrap(fn):
-        ROUTES.append((method, re.compile(f"^{pattern}$"), roles, fn))
+        ROUTES.append((method, re.compile(f"^{pattern}$"), perms, fn))
         return fn
 
     return wrap
@@ -357,7 +371,7 @@ def list_categories(conn, user, params, data, query):
     return rows(conn.execute("SELECT * FROM categories ORDER BY sort, name"))
 
 
-@route("POST", "/api/categories", ("admin",))
+@route("POST", "/api/categories", ("menu",))
 def create_category(conn, user, params, data, query):
     require(data, "name")
     cur = conn.execute(
@@ -367,7 +381,7 @@ def create_category(conn, user, params, data, query):
     return {"id": cur.lastrowid}
 
 
-@route("PUT", r"/api/categories/(\d+)", ("admin",))
+@route("PUT", r"/api/categories/(\d+)", ("menu",))
 def update_category(conn, user, params, data, query):
     require(data, "name")
     conn.execute(
@@ -377,7 +391,7 @@ def update_category(conn, user, params, data, query):
     return {"ok": True}
 
 
-@route("DELETE", r"/api/categories/(\d+)", ("admin",))
+@route("DELETE", r"/api/categories/(\d+)", ("menu",))
 def delete_category(conn, user, params, data, query):
     used = conn.execute(
         "SELECT COUNT(*) FROM products WHERE category_id = ? AND active = 1", (params[0],)
@@ -448,7 +462,7 @@ def save_product_image(conn, product_id, data):
         remove_image_file(old)
 
 
-@route("POST", "/api/products", ("admin",))
+@route("POST", "/api/products", ("menu",))
 def create_product(conn, user, params, data, query):
     cur = conn.execute(
         "INSERT INTO products (category_id, name, price, cost, printer_id) VALUES (?,?,?,?,?)",
@@ -458,7 +472,7 @@ def create_product(conn, user, params, data, query):
     return {"id": cur.lastrowid}
 
 
-@route("PUT", r"/api/products/(\d+)", ("admin",))
+@route("PUT", r"/api/products/(\d+)", ("menu",))
 def update_product(conn, user, params, data, query):
     conn.execute(
         "UPDATE products SET category_id = ?, name = ?, price = ?, cost = ?, printer_id = ? WHERE id = ?",
@@ -468,7 +482,7 @@ def update_product(conn, user, params, data, query):
     return {"ok": True}
 
 
-@route("DELETE", r"/api/products/(\d+)", ("admin",))
+@route("DELETE", r"/api/products/(\d+)", ("menu",))
 def delete_product(conn, user, params, data, query):
     # Eski buyurtmalar tarixi saqlanishi uchun o'chirmaymiz, faqat yashiramiz
     conn.execute("UPDATE products SET active = 0 WHERE id = ?", (params[0],))
@@ -483,7 +497,7 @@ def read_settings(conn, user, params, data, query):
     return get_settings(conn)
 
 
-@route("PUT", "/api/settings", ("admin",))
+@route("PUT", "/api/settings", ("settings",))
 def save_settings(conn, user, params, data, query):
     values = {}
     if "cafe_name" in data:
@@ -518,7 +532,7 @@ def hall_values(data):
     return data["name"].strip(), to_int(data.get("sort") or 0, "sort"), percent
 
 
-@route("POST", "/api/halls", ("admin",))
+@route("POST", "/api/halls", ("halls",))
 def create_hall(conn, user, params, data, query):
     cur = conn.execute(
         "INSERT INTO halls (name, sort, service_percent) VALUES (?, ?, ?)", hall_values(data)
@@ -526,7 +540,7 @@ def create_hall(conn, user, params, data, query):
     return {"id": cur.lastrowid}
 
 
-@route("PUT", r"/api/halls/(\d+)", ("admin",))
+@route("PUT", r"/api/halls/(\d+)", ("halls",))
 def update_hall(conn, user, params, data, query):
     conn.execute(
         "UPDATE halls SET name = ?, sort = ?, service_percent = ? WHERE id = ?",
@@ -535,7 +549,7 @@ def update_hall(conn, user, params, data, query):
     return {"ok": True}
 
 
-@route("DELETE", r"/api/halls/(\d+)", ("admin",))
+@route("DELETE", r"/api/halls/(\d+)", ("halls",))
 def delete_hall(conn, user, params, data, query):
     used = conn.execute(
         "SELECT COUNT(*) FROM tables WHERE hall_id = ? AND active = 1", (params[0],)
@@ -586,7 +600,7 @@ def list_tables(conn, user, params, data, query):
     return tables
 
 
-@route("POST", "/api/tables", ("admin",))
+@route("POST", "/api/tables", ("halls",))
 def create_table(conn, user, params, data, query):
     cur = conn.execute(
         "INSERT INTO tables (name, seats, hall_id) VALUES (?, ?, ?)",
@@ -595,7 +609,7 @@ def create_table(conn, user, params, data, query):
     return {"id": cur.lastrowid}
 
 
-@route("PUT", r"/api/tables/(\d+)", ("admin",))
+@route("PUT", r"/api/tables/(\d+)", ("halls",))
 def update_table(conn, user, params, data, query):
     conn.execute(
         "UPDATE tables SET name = ?, seats = ?, hall_id = ? WHERE id = ?",
@@ -604,7 +618,7 @@ def update_table(conn, user, params, data, query):
     return {"ok": True}
 
 
-@route("DELETE", r"/api/tables/(\d+)", ("admin",))
+@route("DELETE", r"/api/tables/(\d+)", ("halls",))
 def delete_table(conn, user, params, data, query):
     busy = conn.execute(
         "SELECT COUNT(*) FROM orders WHERE table_id = ? AND status = 'open'", (params[0],)
@@ -618,7 +632,7 @@ def delete_table(conn, user, params, data, query):
 # --- buyurtmalar
 
 
-@route("GET", "/api/orders")
+@route("GET", "/api/orders", ("tables", "cashier"))
 def list_orders(conn, user, params, data, query):
     status = query.get("status", ["open"])[0]
     orders = rows(
@@ -639,7 +653,7 @@ def list_orders(conn, user, params, data, query):
     return orders
 
 
-@route("POST", "/api/orders")
+@route("POST", "/api/orders", ("tables",))
 def create_order(conn, user, params, data, query):
     order_type = data.get("type", "dine_in")
     if order_type not in ("dine_in", "takeaway"):
@@ -664,12 +678,12 @@ def create_order(conn, user, params, data, query):
     return order_detail(conn, cur.lastrowid)
 
 
-@route("GET", r"/api/orders/(\d+)")
+@route("GET", r"/api/orders/(\d+)", ("tables", "cashier", "reports"))
 def get_order(conn, user, params, data, query):
     return order_detail(conn, params[0])
 
 
-@route("POST", r"/api/orders/(\d+)/items")
+@route("POST", r"/api/orders/(\d+)/items", ("tables",))
 def add_item(conn, user, params, data, query):
     open_order(conn, params[0])
     require(data, "product_id")
@@ -693,7 +707,7 @@ def add_item(conn, user, params, data, query):
     return order_detail(conn, params[0])
 
 
-@route("PUT", r"/api/orders/(\d+)/items/(\d+)")
+@route("PUT", r"/api/orders/(\d+)/items/(\d+)", ("tables",))
 def update_item(conn, user, params, data, query):
     open_order(conn, params[0])
     qty = to_int(data.get("qty"), "qty", 0)
@@ -714,7 +728,7 @@ def update_item(conn, user, params, data, query):
     return order_detail(conn, params[0])
 
 
-@route("POST", r"/api/orders/(\d+)/pay", ("admin", "cashier"))
+@route("POST", r"/api/orders/(\d+)/pay", ("cashier",))
 def pay_order(conn, user, params, data, query):
     order = open_order(conn, params[0])
     if not order["items"]:
@@ -735,7 +749,7 @@ def pay_order(conn, user, params, data, query):
     return order_detail(conn, params[0])
 
 
-@route("POST", r"/api/orders/(\d+)/cancel", ("admin", "cashier"))
+@route("POST", r"/api/orders/(\d+)/cancel", ("cashier",))
 def cancel_order(conn, user, params, data, query):
     open_order(conn, params[0])
     conn.execute(
@@ -784,7 +798,7 @@ def list_printers(conn, user, params, data, query):
     return rows(conn.execute("SELECT * FROM printers WHERE active = 1 ORDER BY id"))
 
 
-@route("POST", "/api/printers", ("admin",))
+@route("POST", "/api/printers", ("printers",))
 def create_printer(conn, user, params, data, query):
     cur = conn.execute(
         "INSERT INTO printers (name, kind, address, port, width) VALUES (?,?,?,?,?)",
@@ -793,7 +807,7 @@ def create_printer(conn, user, params, data, query):
     return {"id": cur.lastrowid}
 
 
-@route("PUT", r"/api/printers/(\d+)", ("admin",))
+@route("PUT", r"/api/printers/(\d+)", ("printers",))
 def update_printer(conn, user, params, data, query):
     conn.execute(
         "UPDATE printers SET name = ?, kind = ?, address = ?, port = ?, width = ? WHERE id = ?",
@@ -802,14 +816,14 @@ def update_printer(conn, user, params, data, query):
     return {"ok": True}
 
 
-@route("DELETE", r"/api/printers/(\d+)", ("admin",))
+@route("DELETE", r"/api/printers/(\d+)", ("printers",))
 def delete_printer(conn, user, params, data, query):
     conn.execute("UPDATE printers SET active = 0 WHERE id = ?", (params[0],))
     conn.execute("UPDATE products SET printer_id = NULL WHERE printer_id = ?", (params[0],))
     return {"ok": True}
 
 
-@route("GET", "/api/printers/system", ("admin",))
+@route("GET", "/api/printers/system", ("printers",))
 def system_printers(conn, user, params, data, query):
     # Printerlarni qidirish bazaga tegmaydi - qulfdan tashqarida bajariladi
     def run():
@@ -821,7 +835,7 @@ def system_printers(conn, user, params, data, query):
     return Deferred(run)
 
 
-@route("GET", "/api/printers/scan", ("admin",))
+@route("GET", "/api/printers/scan", ("printers",))
 def scan_printers(conn, user, params, data, query):
     return Deferred(printing.scan_network)
 
@@ -835,7 +849,7 @@ def get_printer(conn, printer_id):
     return dict(printer)
 
 
-@route("POST", r"/api/printers/(\d+)/test", ("admin",))
+@route("POST", r"/api/printers/(\d+)/test", ("printers",))
 def test_printer(conn, user, params, data, query):
     printer = get_printer(conn, params[0])
     fake_order = {"id": 0, "type": "takeaway", "table_name": "", "waiter_name": user["full_name"]}
@@ -859,7 +873,7 @@ def pending_lines(items, sent_field, only_with_printer):
     return groups
 
 
-@route("POST", r"/api/orders/(\d+)/kitchen-print")
+@route("POST", r"/api/orders/(\d+)/kitchen-print", ("tables",))
 def kitchen_print(conn, user, params, data, query):
     order = open_order(conn, params[0])
     items = order_items_with_printer(conn, params[0])
@@ -889,7 +903,7 @@ def kitchen_print(conn, user, params, data, query):
     return result
 
 
-@route("POST", r"/api/orders/(\d+)/kitchen-send")
+@route("POST", r"/api/orders/(\d+)/kitchen-send", ("tables",))
 def kitchen_send(conn, user, params, data, query):
     open_order(conn, params[0])
     groups = pending_lines(order_items_with_printer(conn, params[0]), "kds_qty", only_with_printer=False)
@@ -906,7 +920,7 @@ def kitchen_send(conn, user, params, data, query):
     return order_detail(conn, params[0])
 
 
-@route("GET", "/api/kitchen", ("admin", "cashier", "cook"))
+@route("GET", "/api/kitchen", ("kitchen",))
 def kitchen_tickets(conn, user, params, data, query):
     sql = """SELECT k.*, o.type, t.name AS table_name, h.name AS hall_name,
                     u.full_name AS waiter_name, pr.name AS printer_name
@@ -930,7 +944,7 @@ def kitchen_tickets(conn, user, params, data, query):
     return tickets
 
 
-@route("POST", r"/api/kitchen/(\d+)/ready", ("admin", "cashier", "cook"))
+@route("POST", r"/api/kitchen/(\d+)/ready", ("kitchen",))
 def kitchen_ready(conn, user, params, data, query):
     conn.execute(
         "UPDATE kitchen_tickets SET status = 'ready', ready_at = ? WHERE id = ?", (now(), params[0])
@@ -941,7 +955,7 @@ def kitchen_ready(conn, user, params, data, query):
 # --- hisobot
 
 
-@route("GET", "/api/reports", ("admin", "cashier"))
+@route("GET", "/api/reports", ("reports",))
 def report(conn, user, params, data, query):
     today = datetime.now().strftime("%Y-%m-%d")
     date_from = query.get("from", [today])[0]
@@ -1012,56 +1026,142 @@ def report(conn, user, params, data, query):
 # --- xodimlar
 
 
-@route("GET", "/api/users", ("admin",))
+def effective_permissions(role, stored):
+    if role == "admin":
+        return list(PERMISSIONS)
+    if stored is None:
+        return list(ROLE_DEFAULTS.get(role, ()))
+    try:
+        return [p for p in json.loads(stored) if p in PERMISSIONS]
+    except (ValueError, TypeError):
+        return list(ROLE_DEFAULTS.get(role, ()))
+
+
+def public_user(row):
+    user = {k: row[k] for k in ("id", "username", "full_name", "role")}
+    user["permissions"] = effective_permissions(row["role"], row["permissions"])
+    return user
+
+
+@route("GET", "/api/users", ("users",))
 def list_users(conn, user, params, data, query):
-    return rows(
-        conn.execute("SELECT id, username, full_name, role, active FROM users ORDER BY id")
+    users = rows(
+        conn.execute(
+            """SELECT id, username, full_name, first_name, last_name, phone, role, permissions, active
+               FROM users ORDER BY active DESC, id"""
+        )
     )
+    for u in users:
+        if u["first_name"] is None:  # eski versiyada yaratilgan xodim
+            u["first_name"], _, u["last_name"] = u["full_name"].partition(" ")
+        u["permissions"] = effective_permissions(u["role"], u["permissions"])
+    return users
 
 
-def check_role(role):
-    if role not in ROLES:
+def user_values(conn, user, data, target=None):
+    """Ism, familiya, telefon, rol va ruxsatlarni tekshiradi."""
+    if not data.get("first_name") and data.get("full_name"):
+        data["first_name"], _, data["last_name"] = data["full_name"].strip().partition(" ")
+    require(data, "first_name", "role")
+    if data["role"] not in ROLES:
         raise ApiError(400, "Noto'g'ri rol")
+    # Administratorni faqat administrator yaratadi/o'zgartiradi
+    target_role = target["role"] if target else None
+    if user["role"] != "admin" and "admin" in (data["role"], target_role):
+        raise ApiError(403, "Administratorni faqat administrator boshqaradi")
+    first = data["first_name"].strip()
+    last = (data.get("last_name") or "").strip()
+    phone = (data.get("phone") or "").strip() or None
+    if data["role"] == "admin":
+        perms = None
+    elif "permissions" in data:
+        if not isinstance(data["permissions"], list):
+            raise ApiError(400, "Ruxsatlar ro'yxat bo'lishi kerak")
+        perms = json.dumps([p for p in PERMISSIONS if p in data["permissions"]])
+    else:
+        perms = target["permissions"] if target and target["role"] == data["role"] else None
+    return first, last, f"{first} {last}".strip(), phone, data["role"], perms
 
 
-@route("POST", "/api/users", ("admin",))
-def create_user(conn, user, params, data, query):
-    require(data, "username", "full_name", "role", "password")
-    check_role(data["role"])
-    if len(data["password"]) < 4:
+def check_password(password):
+    if len(password or "") < 4:
         raise ApiError(400, "Parol kamida 4 belgi bo'lishi kerak")
-    if conn.execute("SELECT 1 FROM users WHERE username = ?", (data["username"].strip(),)).fetchone():
-        raise ApiError(409, "Bu login band")
+
+
+@route("POST", "/api/users", ("users",))
+def create_user(conn, user, params, data, query):
+    require(data, "username", "password")
+    check_password(data["password"])
+    username = data["username"].strip()
+    if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+        raise ApiError(409, "Bu username band")
     pw, salt = hash_password(data["password"])
     cur = conn.execute(
-        "INSERT INTO users (username, full_name, role, password_hash, salt) VALUES (?,?,?,?,?)",
-        (data["username"].strip(), data["full_name"].strip(), data["role"], pw, salt),
+        """INSERT INTO users (first_name, last_name, full_name, phone, role, permissions,
+                              username, password_hash, salt) VALUES (?,?,?,?,?,?,?,?,?)""",
+        (*user_values(conn, user, data), username, pw, salt),
     )
     return {"id": cur.lastrowid}
 
 
-@route("PUT", r"/api/users/(\d+)", ("admin",))
+def get_user_row(conn, user_id):
+    target = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target:
+        raise ApiError(404, "Xodim topilmadi")
+    return target
+
+
+@route("PUT", r"/api/users/(\d+)", ("users",))
 def update_user(conn, user, params, data, query):
-    require(data, "full_name", "role")
-    check_role(data["role"])
-    target = int(params[0])
+    target_id = int(params[0])
+    target = get_user_row(conn, target_id)
+    values = user_values(conn, user, data, target)
     active = 1 if data.get("active", True) else 0
-    if target == user["id"] and (data["role"] != "admin" or not active):
-        raise ApiError(400, "O'zingizning admin huquqingizni o'chira olmaysiz")
+    if target_id == user["id"]:
+        if not active or values[4] != user["role"]:
+            raise ApiError(400, "O'zingizning rolingizni o'zgartira yoki o'chira olmaysiz")
+        if "users" not in effective_permissions(values[4], values[5]):
+            raise ApiError(400, "O'zingizdan \"Xodimlar\" ruxsatini olib tashlay olmaysiz")
     conn.execute(
-        "UPDATE users SET full_name = ?, role = ?, active = ? WHERE id = ?",
-        (data["full_name"].strip(), data["role"], active, target),
+        """UPDATE users SET first_name = ?, last_name = ?, full_name = ?, phone = ?, role = ?,
+                  permissions = ?, active = ? WHERE id = ?""",
+        (*values, active, target_id),
     )
     if data.get("password"):
-        if len(data["password"]) < 4:
-            raise ApiError(400, "Parol kamida 4 belgi bo'lishi kerak")
+        check_password(data["password"])
         pw, salt = hash_password(data["password"])
-        conn.execute(
-            "UPDATE users SET password_hash = ?, salt = ? WHERE id = ?", (pw, salt, target)
-        )
+        conn.execute("UPDATE users SET password_hash = ?, salt = ? WHERE id = ?", (pw, salt, target_id))
     if not active or data.get("password"):
-        conn.execute("DELETE FROM sessions WHERE user_id = ?", (target,))
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (target_id,))
     return {"ok": True}
+
+
+@route("DELETE", r"/api/users/(\d+)", ("users",))
+def delete_user(conn, user, params, data, query):
+    target_id = int(params[0])
+    target = get_user_row(conn, target_id)
+    if target_id == user["id"]:
+        raise ApiError(400, "O'zingizni o'chira olmaysiz")
+    if target["role"] == "admin" and user["role"] != "admin":
+        raise ApiError(403, "Administratorni faqat administrator boshqaradi")
+    # Buyurtmalar tarixi saqlanishi uchun o'chirilmaydi, faqat bloklanadi
+    conn.execute("UPDATE users SET active = 0 WHERE id = ?", (target_id,))
+    conn.execute("DELETE FROM sessions WHERE user_id = ?", (target_id,))
+    return {"ok": True}
+
+
+# --- tarmoq
+
+
+def lan_urls():
+    _, ips = printing.local_networks()
+    ips = sorted(ip for ip in ips if not ip.startswith(("127.", "169.254.")))
+    return [f"http://{ip}:{PORT}" for ip in ips]
+
+
+@route("GET", "/api/network")
+def network_info(conn, user, params, data, query):
+    return {"port": PORT, "urls": lan_urls()}
 
 
 # ---------------------------------------------------------------- HTTP
@@ -1132,12 +1232,12 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             return None
         row = conn.execute(
-            """SELECT u.id, u.username, u.full_name, u.role FROM sessions s
+            """SELECT u.id, u.username, u.full_name, u.role, u.permissions FROM sessions s
                JOIN users u ON u.id = s.user_id
                WHERE s.token = ? AND s.expires_at > ? AND u.active = 1""",
             (token, now()),
         ).fetchone()
-        return dict(row) if row else None
+        return public_user(row) if row else None
 
     def read_json(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -1194,15 +1294,15 @@ class Handler(BaseHTTPRequestHandler):
         if not user:
             raise ApiError(401, "Tizimga kiring")
         path_matched = False
-        for r_method, pattern, roles, fn in ROUTES:
+        for r_method, pattern, perms, fn in ROUTES:
             m = pattern.match(path)
             if not m:
                 continue
             path_matched = True
             if r_method != method:
                 continue
-            if roles and user["role"] not in roles:
-                raise ApiError(403, "Bu amal uchun ruxsatingiz yo'q")
+            if perms and not set(perms) & set(user["permissions"]):
+                raise ApiError(403, "Bu bo'limga ruxsatingiz yo'q")
             return 200, fn(conn, user, m.groups(), data, query), None
         raise ApiError(405 if path_matched else 404, "Topilmadi")
 
@@ -1222,8 +1322,7 @@ class Handler(BaseHTTPRequestHandler):
             "INSERT INTO sessions (token, user_id, expires_at) VALUES (?,?,?)", (token, row["id"], expires)
         )
         cookie = f"sid={token}; Path=/; Max-Age={SESSION_DAYS * 86400}; HttpOnly; SameSite=Strict"
-        user = {k: row[k] for k in ("id", "username", "full_name", "role")}
-        return 200, user, {"Set-Cookie": cookie}
+        return 200, public_user(row), {"Set-Cookie": cookie}
 
 
 def make_server(port=PORT, host="0.0.0.0"):
@@ -1245,6 +1344,8 @@ def main():
     url = f"http://localhost:{PORT}"
     print("=" * 50)
     print(f"  CafePOS ishga tushdi: {url}")
+    for lan in lan_urls():
+        print(f"  Telefon/planshetdan (shu Wi-Fi): {lan}")
     print("  Login: admin   Parol: admin123")
     print("  To'xtatish uchun shu oynani yoping (yoki Ctrl+C)")
     print("=" * 50)

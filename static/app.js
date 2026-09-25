@@ -51,8 +51,9 @@ function place(o) {
   return [o.hall_name, o.table_name].filter(Boolean).join(" · ");
 }
 
-function can(...roles) {
-  return state.user && roles.includes(state.user.role);
+// Foydalanuvchida shu ruxsatlardan birortasi bormi
+function can(...perms) {
+  return !!state.user && perms.some((p) => state.user.permissions.includes(p));
 }
 
 let toastTimer;
@@ -197,21 +198,32 @@ function icon(name) {
     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 }
 
-// [guruh nomi, [[havola, ikonka, nomi], ...]]
+// Bo'limlar: [ruxsat, havola, ikonka, nomi]
+const SECTIONS = [
+  ["Ish", [
+    ["tables", "#/tables", "tables", "Stollar"],
+    ["cashier", "#/cashier", "cashier", "Kassa"],
+    ["kitchen", "#/kitchen", "kitchen", "Oshxona"],
+    ["reports", "#/reports", "reports", "Hisobot"],
+  ]],
+  ["Boshqaruv", [
+    ["menu", "#/menu", "menu", "Menyu"],
+    ["halls", "#/tables-admin", "halls", "Zallar"],
+    ["printers", "#/printers", "printer", "Printerlar"],
+    ["users", "#/users", "users", "Xodimlar"],
+    ["settings", "#/settings", "settings", "Sozlamalar"],
+  ]],
+];
+
 function navGroups() {
-  if (can("cook")) return [["Ish", [["#/kitchen", "kitchen", "Oshxona"]]]];
-  const main = [["#/tables", "tables", "Stollar"]];
-  if (can("admin", "cashier")) main.push(["#/cashier", "cashier", "Kassa"], ["#/kitchen", "kitchen", "Oshxona"], ["#/reports", "reports", "Hisobot"]);
-  const groups = [["Ish", main]];
-  if (can("admin")) groups.push(["Boshqaruv", [
-    ["#/menu", "menu", "Menyu"], ["#/tables-admin", "halls", "Zallar"], ["#/printers", "printer", "Printerlar"],
-    ["#/users", "users", "Xodimlar"], ["#/settings", "settings", "Sozlamalar"],
-  ]]);
-  return groups;
+  return SECTIONS
+    .map(([title, items]) => [title, items.filter(([perm]) => can(perm)).map(([, ...rest]) => rest)])
+    .filter(([, items]) => items.length);
 }
 
 function defaultRoute() {
-  return can("cook") ? "#/kitchen" : "#/tables";
+  const first = navGroups()[0];
+  return first ? first[1][0][0] : "#/none";
 }
 
 function layout(content) {
@@ -379,7 +391,7 @@ async function viewOrder(id) {
     }));
 
     const list = state.products.filter((p) => activeCat === "all" || String(p.category_id) === String(activeCat));
-    const closed = order.status !== "open";
+    const closed = order.status !== "open" || !can("tables");
     $("#products").innerHTML = list.map((p) => `
       <button class="product-card ${p.image ? "with-img" : ""}" data-id="${p.id}" ${closed ? "disabled" : ""}>
         ${p.image ? `<img src="/uploads/${encodeURIComponent(p.image)}" alt="" loading="lazy">` : ""}
@@ -419,12 +431,12 @@ async function viewOrder(id) {
         ${order.payment_method ? `<div class="muted"><span>To'lov</span><span>${METHOD_NAMES[order.payment_method]}</span></div>` : ""}
       </div>
       <div class="cart-actions">
-        ${open && can("admin", "cashier") ? `<button class="btn primary big" id="pay-btn" ${order.items.length ? "" : "disabled"}>💰 To'lash</button>` : ""}
+        ${open && can("cashier") ? `<button class="btn primary big" id="pay-btn" ${order.items.length ? "" : "disabled"}>💰 To'lash</button>` : ""}
         <div class="row">
           <button class="btn" id="print-btn" ${order.items.length ? "" : "disabled"}>🖨️ Chek</button>
-          ${open && can("admin", "cashier") ? `<button class="btn danger" id="cancel-btn">Bekor qilish</button>` : ""}
+          ${open && can("cashier") ? `<button class="btn danger" id="cancel-btn">Bekor qilish</button>` : ""}
         </div>
-        ${open ? `
+        ${open && can("tables") ? `
         <div class="kitchen-actions">
           <button class="btn kitchen" id="kitchen-print-btn" ${order.items.length ? "" : "disabled"}>
             🖨️ Oshxona printeriga${order.pending_print ? ` <span class="count">${order.pending_print}</span>` : ""}
@@ -896,46 +908,153 @@ async function viewTablesAdmin() {
 
 // ------------------------------------------------------------ xodimlar (admin)
 
+const PERMISSION_LIST = [
+  ["tables", "tables", "Stollar va buyurtmalar"],
+  ["cashier", "cashier", "Kassa (to'lov, bekor qilish)"],
+  ["kitchen", "kitchen", "Oshxona ekrani"],
+  ["reports", "reports", "Hisobot"],
+  ["menu", "menu", "Menyu"],
+  ["halls", "halls", "Zallar va stollar"],
+  ["printers", "printer", "Printerlar"],
+  ["users", "users", "Xodimlar"],
+  ["settings", "settings", "Sozlamalar"],
+];
+const ROLE_DEFAULTS = {
+  admin: PERMISSION_LIST.map(([k]) => k),
+  cashier: ["tables", "cashier", "kitchen", "reports"],
+  waiter: ["tables"],
+  cook: ["kitchen"],
+};
+const ROLE_ICONS = { cashier: "cashier", waiter: "tables", cook: "kitchen", admin: "settings" };
+
 async function viewUsers() {
   const users = await api("GET", "/api/users");
-  layout(`
-    <div class="panel" style="max-width:800px">
-      <div class="toolbar"><h2>Xodimlar</h2><button class="btn primary small" id="add">+ Xodim qo'shish</button></div>
-      <table class="list">
-        <thead><tr><th>F.I.Sh.</th><th>Login</th><th>Rol</th><th>Holati</th><th></th></tr></thead>
+  const active = users.filter((u) => u.active);
+  const count = (role) => active.filter((u) => u.role === role).length;
+  const initials = (u) => ((u.first_name || "")[0] || "") + ((u.last_name || "")[0] || "");
+  const view = layout(`
+    <div class="panel">
+      <div class="toolbar"><h2>Xodimlar</h2><button class="btn primary" id="add">+ Xodim qo'shish</button></div>
+      <table class="list users-table">
+        <thead><tr><th>#</th><th>Ismi</th><th>Username</th><th>Rol</th><th>Telefon</th><th>Ruxsatlar</th><th>Holati</th><th></th></tr></thead>
         <tbody>
-          ${users.map((u) => `
-            <tr><td>${esc(u.full_name)}</td><td>${esc(u.username)}</td><td>${ROLE_NAMES[u.role]}</td>
-              <td>${u.active ? `<span class="badge">Faol</span>` : `<span class="badge off">O'chirilgan</span>`}</td>
-              <td class="right"><button class="btn small" data-edit="${u.id}">✏️</button></td></tr>`).join("")}
+          ${users.map((u, i) => `
+            <tr class="${u.active ? "" : "inactive"}">
+              <td class="muted">${i + 1}</td>
+              <td><div class="person"><span class="avatar-sm role-${u.role}">${esc(initials(u).toUpperCase())}</span>
+                ${esc(u.full_name)}</div></td>
+              <td><code>${esc(u.username)}</code></td>
+              <td><span class="role-badge role-${u.role}">${ROLE_NAMES[u.role]}</span></td>
+              <td>${esc(u.phone || "—")}</td>
+              <td class="muted">${u.role === "admin" ? "Hammasi" : `${u.permissions.length} / ${PERMISSION_LIST.length}`}</td>
+              <td>${u.active ? `<span class="badge">Faol</span>` : `<span class="badge off">Bloklangan</span>`}</td>
+              <td class="right" style="white-space:nowrap">
+                <button class="btn small" data-edit="${u.id}">✏️</button>
+                ${u.id !== state.user.id && u.active ? `<button class="btn small danger" data-del="${u.id}">🗑</button>` : ""}
+              </td>
+            </tr>`).join("")}
         </tbody>
       </table>
+      <p class="muted users-summary">Jami: ${active.length} ta xodim ·
+        ${Object.keys(ROLE_NAMES).map((r) => `${ROLE_NAMES[r]}: ${count(r)}`).join(" · ")}</p>
     </div>`);
 
-  const form = (u = {}) => openModal(`
-    <form id="f"><h2>${u.id ? "Xodimni tahrirlash" : "Yangi xodim"}</h2>
-      <label><span>F.I.Sh.</span><input name="full_name" value="${esc(u.full_name || "")}" required></label>
-      ${u.id ? "" : `<label><span>Login</span><input name="username" required></label>`}
-      <label><span>Rol</span>
-        <select name="role">${Object.entries(ROLE_NAMES).map(([k, v]) =>
-          `<option value="${k}" ${k === (u.role || "waiter") ? "selected" : ""}>${v}</option>`).join("")}</select></label>
-      <label><span>${u.id ? "Yangi parol (o'zgartirmaslik uchun bo'sh qoldiring)" : "Parol"}</span>
-        <input name="password" type="password" minlength="4" ${u.id ? "" : "required"}></label>
-      ${u.id ? `<label><input type="checkbox" name="active" ${u.active ? "checked" : ""} style="width:auto"> Faol</label>` : ""}
-      <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
-    </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
-    e.preventDefault();
-    const data = formData(e.target);
-    if (u.id) data.active = e.target.active.checked;
-    await api(u.id ? "PUT" : "POST", "/api/users" + (u.id ? "/" + u.id : ""), data);
-    closeModal();
-    toast("Saqlandi");
+  $("#add", view).addEventListener("click", () => userForm());
+  $$("[data-edit]", view).forEach((b) => b.addEventListener("click", () =>
+    userForm(users.find((u) => u.id === +b.dataset.edit))));
+  $$("[data-del]", view).forEach((b) => b.addEventListener("click", safe(async () => {
+    const u = users.find((x) => x.id === +b.dataset.del);
+    if (!confirm(`${u.full_name} bloklansinmi? U tizimga kira olmaydi (tarixi saqlanadi).`)) return;
+    await api("DELETE", "/api/users/" + u.id);
+    toast("Xodim bloklandi");
     viewUsers();
   })));
+}
 
-  $("#add").addEventListener("click", () => form());
-  $$("[data-edit]").forEach((b) => b.addEventListener("click", () =>
-    form(users.find((u) => u.id === +b.dataset.edit))));
+function userForm(u = null) {
+  const isNew = !u;
+  u = u || { role: "cashier", permissions: ROLE_DEFAULTS.cashier, active: 1 };
+  const roles = Object.keys(ROLE_NAMES).filter((r) => r !== "admin" || state.user.role === "admin" || u.role === "admin");
+  openModal(`
+    <form id="f" class="user-form">
+      <div class="modal-head"><h2>${isNew ? "Yangi xodim qo'shish" : "Xodimni tahrirlash"}</h2>
+        <button type="button" class="icon-btn" data-close aria-label="Yopish">✕</button></div>
+      <div class="grid-2">
+        <label><span>Ismi *</span><input name="first_name" value="${esc(u.first_name || "")}" required></label>
+        <label><span>Familiyasi</span><input name="last_name" value="${esc(u.last_name || "")}"></label>
+        <label><span>Username *</span><input name="username" value="${esc(u.username || "")}" ${isNew ? "required" : "disabled"}
+          autocomplete="off" autocapitalize="off"></label>
+        <label><span>${isNew ? "Parol *" : "Yangi parol"}</span><input name="password" type="password" minlength="4"
+          ${isNew ? "required" : `placeholder="O'zgartirmaslik uchun bo'sh"`} autocomplete="new-password"></label>
+      </div>
+      <div class="grid-2">
+        <div>
+          <span class="field-label">Rol *</span>
+          <div class="role-cards">
+            ${roles.map((r) => `
+              <label class="role-card"><input type="radio" name="role" value="${r}" ${r === u.role ? "checked" : ""}>
+                <span>${icon(ROLE_ICONS[r])}${ROLE_NAMES[r]}</span></label>`).join("")}
+          </div>
+        </div>
+        <label><span>Telefon</span><input name="phone" type="tel" value="${esc(u.phone || "")}" placeholder="+998 90 123 45 67"></label>
+      </div>
+      <div class="perm-head">
+        <span class="field-label">🛡️ Bo'limlarga kirish ruxsati</span>
+        <small class="muted">Administrator = barcha bo'limlarga kiradi</small>
+      </div>
+      <div class="perm-box">
+        <div class="perm-tools">
+          <button type="button" class="btn small" id="perm-all">✅ Hammasini tanlash</button>
+          <button type="button" class="btn small" id="perm-none">✖ Hammasini olib tashlash</button>
+        </div>
+        <div class="perm-grid">
+          ${PERMISSION_LIST.map(([k, ic, name]) => `
+            <label class="perm-item"><input type="checkbox" name="perm" value="${k}" ${u.permissions.includes(k) ? "checked" : ""}>
+              ${icon(ic)}<span>${name}</span></label>`).join("")}
+        </div>
+      </div>
+      ${isNew ? "" : `<label class="check-line"><input type="checkbox" name="active" ${u.active ? "checked" : ""}> Faol (tizimga kira oladi)</label>`}
+      <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">💾 Saqlash</button></div>
+    </form>`, (m) => {
+    const boxes = $$("input[name=perm]", m);
+    const role = () => $("input[name=role]:checked", m).value;
+    const syncAdmin = () => {
+      const admin = role() === "admin";
+      boxes.forEach((b) => { b.disabled = admin; if (admin) b.checked = true; });
+      $("#perm-all", m).disabled = $("#perm-none", m).disabled = admin;
+    };
+    $$("input[name=role]", m).forEach((r) => r.addEventListener("change", () => {
+      // Rol tanlanganda uning standart ruxsatlari belgilanadi, keyin qo'lda o'zgartirish mumkin
+      boxes.forEach((b) => { b.checked = ROLE_DEFAULTS[role()].includes(b.value); });
+      syncAdmin();
+    }));
+    $("#perm-all", m).addEventListener("click", () => boxes.forEach((b) => { b.checked = true; }));
+    $("#perm-none", m).addEventListener("click", () => boxes.forEach((b) => { b.checked = false; }));
+    syncAdmin();
+
+    $("#f", m).addEventListener("submit", safe(async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const data = {
+        first_name: f.first_name.value, last_name: f.last_name.value, phone: f.phone.value,
+        role: role(), permissions: boxes.filter((b) => b.checked).map((b) => b.value),
+      };
+      if (!data.permissions.length) throw new Error("Kamida bitta bo'limga ruxsat bering");
+      if (f.password.value) data.password = f.password.value;
+      if (isNew) data.username = f.username.value;
+      else data.active = f.active.checked;
+      await api(isNew ? "POST" : "PUT", "/api/users" + (isNew ? "" : "/" + u.id), data);
+      closeModal();
+      toast("Saqlandi ✅");
+      if (!isNew && u.id === state.user.id) state.user = await api("GET", "/api/me");
+      viewUsers();
+    }));
+  });
+}
+
+function viewNoAccess() {
+  layout(`<div class="panel"><h2>Ruxsat yo'q</h2>
+    <p class="muted">Sizga hali birorta bo'limga ruxsat berilmagan. Administratorga murojaat qiling.</p></div>`);
 }
 
 // ------------------------------------------------------------ printerlar (admin)
@@ -1171,7 +1290,7 @@ async function viewKitchen() {
 
 async function viewSettings() {
   await loadSettings();
-  const halls = await api("GET", "/api/halls");
+  const [halls, network] = await Promise.all([api("GET", "/api/halls"), api("GET", "/api/network")]);
   const s = state.settings;
   layout(`
     <form class="panel settings" id="f" style="max-width:640px">
@@ -1187,10 +1306,27 @@ async function viewSettings() {
           ${halls.map((h) => `<tr><td>${esc(h.name)}</td><td class="right">${h.service_percent === null
             ? `<span class="muted">umumiy</span>` : percent(h.service_percent)}</td></tr>`).join("")}
         </table>
-        <p class="muted">Kabina yoki banket zali uchun boshqa foiz kerak bo'lsa, "🏛️ Zallar va stollar" bo'limida zalni tahrirlang.</p>` : ""}
+        <p class="muted">Kabina yoki banket zali uchun boshqa foiz kerak bo'lsa, "🏛️ Zallar" bo'limida zalni tahrirlang.</p>` : ""}
       <div class="actions"><button class="btn primary">Saqlash</button></div>
-    </form>`);
+    </form>
+    <div class="panel network-panel" style="max-width:640px">
+      <h3>📶 Telefon, planshet va boshqa kompyuterlardan kirish</h3>
+      <p class="muted">Qurilma shu kompyuter bilan <b>bitta Wi-Fi / tarmoqda</b> bo'lsin. Brauzerda quyidagi manzilni oching:</p>
+      ${network.urls.map((u) => `<div class="lan-url"><code>${esc(u)}</code>
+        <button type="button" class="btn small" data-copy="${esc(u)}">Nusxa olish</button></div>`).join("")
+        || `<p class="error">Kompyuter tarmoqqa ulanmagan ko'rinadi.</p>`}
+      <p class="muted">Ochilmasa: dastur papkasidagi <b>TARMOQQA_RUXSAT.bat</b> faylini bir marta ishga tushiring
+        (Windows fayervolida ${network.port}-portni ochadi).</p>
+    </div>`);
 
+  $$("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(b.dataset.copy);
+      toast("Nusxa olindi");
+    } catch {
+      toast(b.dataset.copy);
+    }
+  }));
   const input = $("input[name=service_percent]");
   const example = () => {
     const p = +input.value || 0;
@@ -1211,26 +1347,27 @@ async function viewSettings() {
 // ------------------------------------------------------------ router
 
 const routes = [
-  [/^#\/tables$/, viewTables, ["admin", "cashier", "waiter"]],
-  [/^#\/order\/(\d+)$/, viewOrder, ["admin", "cashier", "waiter"]],
-  [/^#\/kitchen$/, viewKitchen, ["admin", "cashier", "cook"]],
-  [/^#\/printers$/, viewPrinters, ["admin"]],
-  [/^#\/cashier$/, viewCashier, ["admin", "cashier"]],
-  [/^#\/reports$/, viewReports, ["admin", "cashier"]],
-  [/^#\/menu$/, viewMenu, ["admin"]],
-  [/^#\/tables-admin$/, viewTablesAdmin, ["admin"]],
-  [/^#\/users$/, viewUsers, ["admin"]],
-  [/^#\/settings$/, viewSettings, ["admin"]],
+  [/^#\/tables$/, viewTables, ["tables"]],
+  [/^#\/order\/(\d+)$/, viewOrder, ["tables", "cashier", "reports"]],
+  [/^#\/kitchen$/, viewKitchen, ["kitchen"]],
+  [/^#\/printers$/, viewPrinters, ["printers"]],
+  [/^#\/cashier$/, viewCashier, ["cashier"]],
+  [/^#\/reports$/, viewReports, ["reports"]],
+  [/^#\/menu$/, viewMenu, ["menu"]],
+  [/^#\/tables-admin$/, viewTablesAdmin, ["halls"]],
+  [/^#\/users$/, viewUsers, ["users"]],
+  [/^#\/settings$/, viewSettings, ["settings"]],
+  [/^#\/none$/, viewNoAccess],
 ];
 
 async function router() {
   if (!state.user) return renderLogin();
   closeModal();
   const hash = location.hash.split("?")[0];
-  for (const [re, view, roles] of routes) {
+  for (const [re, view, perms] of routes) {
     const m = hash.match(re);
     if (!m) continue;
-    if (roles && !can(...roles)) break;
+    if (perms && !can(...perms)) break;  // ruxsat yo'q - o'zining birinchi bo'limiga
     try {
       await view(...m.slice(1));
     } catch (e) {
@@ -1238,7 +1375,7 @@ async function router() {
     }
     return;
   }
-  location.hash = defaultRoute();
+  go(defaultRoute());
 }
 
 window.addEventListener("hashchange", router);

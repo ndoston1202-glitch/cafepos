@@ -9,6 +9,7 @@ Ma'lumotlar shu papkadagi `cafepos.db` (SQLite) faylida saqlanadi.
 |------|----------|
 | **ISHGA_TUSHIR.bat** | Dasturni yoqadi, brauzer o'zi ochiladi |
 | **YANGILASH.bat** | GitHub'dan yangi versiyani oladi |
+| **TARMOQQA_RUXSAT.bat** | Telefon/planshetdan kirish uchun fayervolda ruxsat (bir marta) |
 
 To'xtatish uchun qora oynani yoping.
 
@@ -21,8 +22,6 @@ Login: **admin** · Parol: **admin123** — kirgandan keyin *Xodimlar* bo'limida
 
 Linux/macOS: `python3 server.py`
 
-Boshqa qurilmalardan (planshet, telefon) bir xil Wi-Fi tarmog'ida
-`http://<kompyuter-IP>:8000` orqali kirish mumkin.
 
 ## ✨ Imkoniyatlar
 
@@ -40,14 +39,28 @@ Boshqa qurilmalardan (planshet, telefon) bir xil Wi-Fi tarmog'ida
 - 💹 **Foyda** — tannarx asosida hisobotda foyda ko'rinadi
 - 👥 **Xodimlar** — rollar va login
 
-### Rollar
+### Xodimlar va ruxsatlar
 
-| Rol | Ruxsatlar |
+**👥 Xodimlar → + Xodim qo'shish**: ismi, familiyasi, username, parol, telefon, rol va
+**bo'limlarga kirish ruxsati** (Stollar, Kassa, Oshxona, Hisobot, Menyu, Zallar, Printerlar, Xodimlar, Sozlamalar).
+Rol tanlanganda standart ruxsatlar belgilanadi, keyin xohlagancha o'zgartirish mumkin.
+Ruxsat serverda tekshiriladi va darhol kuchga kiradi.
+
+| Rol | Standart ruxsatlar |
 |-----|-----------|
-| **Administrator** | Hammasi |
-| **Kassir** | Buyurtma, to'lov qabul qilish, bekor qilish, hisobot |
-| **Ofitsiant** | Stollar va buyurtma qo'shish (to'lov va hisobotsiz) |
-| **Oshpaz** | Faqat oshxona ekrani |
+| **Administrator** | Hammasi (o'zgarmaydi) |
+| **Kassir** | Stollar, Kassa, Oshxona, Hisobot |
+| **Ofitsiant** | Stollar |
+| **Oshpaz** | Oshxona |
+
+## 📶 Telefon, planshet va boshqa kompyuterlardan kirish
+
+1. Qurilma dastur ishlayotgan kompyuter bilan **bitta Wi-Fi / tarmoqda** bo'lsin
+2. Manzilni **⚙️ Sozlamalar** bo'limidan yoki qora oynadan oling (masalan `http://192.168.1.10:8000`)
+3. Qurilma brauzerida shu manzilni oching va o'z login/parolingiz bilan kiring
+4. Ochilmasa, **TARMOQQA_RUXSAT.bat** ni bir marta ishga tushiring (Windows fayervolida portni ochadi)
+
+Maslahat: kompyuterga routerda doimiy IP bering, shunda manzil o'zgarmaydi.
 
 ## 🍳 Oshxona printerlari
 

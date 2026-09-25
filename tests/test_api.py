@@ -419,6 +419,58 @@ class ApiTest(unittest.TestCase):
             for o in open_orders:
                 self.admin.call("POST", f"/api/orders/{o['id']}/cancel")
 
+    def test_custom_permissions(self):
+        # Kassir, lekin faqat kassa ruxsati bilan (hisobot yo'q) + menyu ruxsati qo'shilgan
+        status, u = self.admin.call("POST", "/api/users", {
+            "first_name": "Aziz", "last_name": "Karimov", "username": "aziz", "password": "1234",
+            "role": "cashier", "phone": "+998901234567", "permissions": ["cashier", "menu", "nonsense"],
+        })
+        self.assertEqual(status, 200)
+        aziz = Client(self.base).login("aziz", "1234")
+        _, me = aziz.call("GET", "/api/me")
+        self.assertEqual(me["permissions"], ["cashier", "menu"])
+        self.assertEqual(me["full_name"], "Aziz Karimov")
+        self.assertEqual(aziz.call("GET", "/api/reports")[0], 403)
+        self.assertEqual(aziz.call("GET", "/api/orders?status=open")[0], 200)
+        self.assertEqual(aziz.call("POST", "/api/categories", {"name": "Aziz kat"})[0], 200)
+        self.assertEqual(aziz.call("POST", "/api/orders", {"type": "takeaway"})[0], 403)  # stollar ruxsati yo'q
+
+        # Ruxsat o'zgarsa darhol kuchga kiradi (qayta kirish shart emas)
+        self.admin.call("PUT", f"/api/users/{u['id']}", {
+            "first_name": "Aziz", "last_name": "Karimov", "role": "cashier", "permissions": ["reports"],
+        })
+        self.assertEqual(aziz.call("GET", "/api/reports")[0], 200)
+        self.assertEqual(aziz.call("POST", "/api/categories", {"name": "X"})[0], 403)
+
+        # Xodimlar ruxsati bor, lekin admin emas - admin yarata olmaydi
+        self.admin.call("PUT", f"/api/users/{u['id']}", {
+            "first_name": "Aziz", "role": "cashier", "permissions": ["users"],
+        })
+        status, _ = aziz.call("POST", "/api/users", {
+            "first_name": "Boss", "username": "boss", "password": "1234", "role": "admin",
+        })
+        self.assertEqual(status, 403)
+        _, users = aziz.call("GET", "/api/users")
+        admin_row = next(x for x in users if x["username"] == "admin")
+        self.assertEqual(aziz.call("DELETE", f"/api/users/{admin_row['id']}")[0], 403)
+
+        # O'chirish = bloklash
+        self.assertEqual(self.admin.call("DELETE", f"/api/users/{u['id']}")[0], 200)
+        self.assertEqual(aziz.call("GET", "/api/me")[0], 401)
+        status, _ = Client(self.base).call("POST", "/api/login", {"username": "aziz", "password": "1234"})
+        self.assertEqual(status, 401)
+
+    def test_old_users_get_role_defaults(self):
+        _, users = self.admin.call("GET", "/api/users")
+        waiter = next(u for u in users if u["username"] == "ofitsiant")
+        self.assertEqual(waiter["permissions"], ["tables"])
+        self.assertEqual(waiter["first_name"], "Ofitsiant")
+
+    def test_network_info(self):
+        status, info = self.waiter.call("GET", "/api/network")
+        self.assertEqual(status, 200)
+        self.assertIn("urls", info)
+
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})
