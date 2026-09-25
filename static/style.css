@@ -67,8 +67,15 @@ label span { display: block; font-size: 13px; color: var(--muted); margin-bottom
   max-width: 360px;
   box-shadow: 0 10px 30px rgba(0,0,0,.08);
 }
-.login-box h1 { text-align: center; }
-.login-box .logo { font-size: 48px; text-align: center; }
+.login-logo {
+  margin: -32px -32px 24px;
+  padding: 22px 0 18px;
+  background: radial-gradient(circle at 50% 40%, #2c2521, #1f1a17 70%);
+  border-radius: var(--radius) var(--radius) 0 0;
+  text-align: center;
+}
+.login-logo img { width: 210px; max-width: 70%; height: auto; }
+.login-box { overflow: hidden; }
 .error { color: var(--danger); min-height: 20px; margin-bottom: 8px; }
 
 /* --- layout: chap yon panel */
@@ -94,17 +101,11 @@ label span { display: block; font-size: 13px; color: var(--muted); margin-bottom
   padding: 18px 12px;
   z-index: 40;
 }
-.brand { display: flex; align-items: center; gap: 10px; padding: 0 8px 18px; }
-.brand-logo {
-  width: 38px; height: 38px;
-  border-radius: 11px;
-  display: grid; place-items: center;
-  background: linear-gradient(135deg, #e3a063, #a8622c);
-  color: #fff;
-  box-shadow: 0 6px 16px rgba(208, 138, 76, .35);
-}
-.brand-logo .icon { width: 22px; height: 22px; }
-.sidebar .brand-name { color: #fff; font-weight: 700; font-size: 17px; letter-spacing: .2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brand { position: relative; display: flex; justify-content: center; align-items: center; padding: 0 8px 10px; }
+.brand-full { width: 132px; height: auto; display: block; }
+.brand-icon { display: none; width: 44px; height: 44px; border-radius: 11px; }
+.brand .side-toggle { position: absolute; top: 0; right: 0; }
+.cafe-name { text-align: center; color: #fff; font-weight: 600; font-size: 14px; padding: 0 8px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-nav { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .nav-group {
   font-size: 11px;
@@ -192,14 +193,15 @@ label span { display: block; font-size: 13px; color: var(--muted); margin-bottom
 .sidebar { transition: width .2s ease; overflow: hidden; }
 @media (min-width: 761px) {
   body.side-collapsed { --side-width: 76px; }
-  body.side-collapsed .sidebar .brand-name,
-  body.side-collapsed .brand-logo,
+  body.side-collapsed .brand-full,
+  body.side-collapsed .cafe-name,
   body.side-collapsed .side-nav a span,
   body.side-collapsed .who { display: none; }
   body.side-collapsed .nav-group { font-size: 0; padding: 10px 0 4px; margin: 0 14px; border-top: 1px solid rgba(255, 255, 255, .08); }
   body.side-collapsed .nav-group:first-child { border-top: 0; }
-  body.side-collapsed .brand { justify-content: center; padding: 4px 0 14px; }
-  body.side-collapsed .side-toggle { margin: 0; width: 40px; height: 40px; }
+  body.side-collapsed .brand { flex-direction: column; gap: 10px; padding: 0 0 12px; }
+  body.side-collapsed .brand-icon { display: block; }
+  body.side-collapsed .brand .side-toggle { position: static; margin: 0; width: 40px; height: 32px; }
   body.side-collapsed .side-nav a { justify-content: center; padding: 12px; }
   body.side-collapsed .side-user { flex-direction: column; padding: 12px 0 0; }
 }
@@ -228,6 +230,7 @@ label span { display: block; font-size: 13px; color: var(--muted); margin-bottom
     z-index: 20;
   }
   .mobile-bar .brand-name { font-weight: 700; font-size: 17px; }
+  .mobile-logo { width: 34px; height: 34px; border-radius: 9px; }
   .burger {
     border: 1px solid var(--line);
     background: #fff;

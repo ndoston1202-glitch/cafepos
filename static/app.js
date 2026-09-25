@@ -144,8 +144,7 @@ function renderLogin() {
   $("#app").innerHTML = `
     <div class="login-wrap">
       <form class="login-box" id="login-form">
-        <div class="logo">☕</div>
-        <h1>CafePOS</h1>
+        <div class="login-logo"><img src="/img/logo.png" alt="CafePOS — ERP dasturi"></div>
         <label><span>Login</span><input name="username" autocomplete="username" required></label>
         <label><span>Parol</span><input name="password" type="password" autocomplete="current-password" required></label>
         <div class="error" id="login-error"></div>
@@ -177,7 +176,6 @@ async function logout() {
 
 // Chiziqli ikonkalar (24x24, rang - currentColor)
 const ICONS = {
-  logo: '<path d="M10 2v2M14 2v2M6 2v2"/><path d="M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/>',
   tables: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   cashier: '<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>',
   kitchen: '<path d="M17 21a1 1 0 0 0 1-1v-5.35c0-.46.32-.84.73-1.04a4 4 0 0 0-2.14-7.59 5 5 0 0 0-9.18 0 4 4 0 0 0-2.14 7.59c.41.2.73.58.73 1.04V20a1 1 0 0 0 1 1Z"/><path d="M6 17h12"/>',
@@ -234,10 +232,12 @@ function layout(content) {
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-logo">${icon("logo")}</span>
-          <span class="brand-name">${esc(state.settings.cafe_name)}</span>
+          <img class="brand-full" src="/img/logo.png" alt="CafePOS">
+          <img class="brand-icon" src="/img/logo-icon.png" alt="CafePOS">
           <button class="side-toggle" id="side-toggle"></button>
         </div>
+        ${state.settings.cafe_name && state.settings.cafe_name !== "CafePOS"
+          ? `<div class="cafe-name">${esc(state.settings.cafe_name)}</div>` : ""}
         <nav class="side-nav">
           ${navGroups().map(([title, items]) => `
             <div class="nav-group">${esc(title)}</div>
@@ -259,6 +259,7 @@ function layout(content) {
       <div class="content">
         <header class="mobile-bar">
           <button class="burger" id="burger" aria-label="Menyu">${icon("burger")}</button>
+          <img class="mobile-logo" src="/img/logo-icon.png" alt="">
           <span class="brand-name">${esc(state.settings.cafe_name)}</span>
         </header>
         <main id="view">${content}</main>
