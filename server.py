@@ -40,7 +40,7 @@ DB_PATH = os.environ.get("CAFEPOS_DB", os.path.join(BASE_DIR, "cafepos.db"))
 PORT = int(os.environ.get("CAFEPOS_PORT", "8000"))
 SESSION_DAYS = 7
 
-ROLES = ("admin", "cashier", "waiter", "cook")
+ROLES = ("admin", "cashier", "waiter", "cook", "staff")  # staff = ruxsatlari qo'lda belgilangan xodim
 # Bo'limlarga kirish ruxsatlari
 PERMISSIONS = ("tables", "cashier", "kitchen", "reports", "menu", "crm", "finance", "halls", "printers", "users",
                "settings", "journal", "integrations")
@@ -49,6 +49,7 @@ ROLE_DEFAULTS = {
     "cashier": ("tables", "cashier", "kitchen", "reports", "crm"),
     "waiter": ("tables",),
     "cook": ("kitchen",),
+    "staff": (),
 }
 # Buyurtma to'lov usullari ("debt" = qarzga - pul keyin CRM > Qarzlar orqali tushadi)
 PAYMENT_METHODS = ("cash", "card", "payme", "click", "debt")
@@ -2223,14 +2224,20 @@ def set_pin(conn, user_id, pin):
 
 @route("POST", "/api/users", ("users",))
 def create_user(conn, user, params, data, query):
-    require(data, "username")
     if not data.get("password") and not data.get("pin"):
-        raise ApiError(400, "PIN kod kiriting")
+        raise ApiError(400, "Parol (4 ta raqam) kiriting")
     if data.get("password"):
         check_password(data["password"])
-    username = data["username"].strip()
-    if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
-        raise ApiError(409, "Bu username band")
+    username = (data.get("username") or "").strip()
+    if username:
+        if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+            raise ApiError(409, "Bu username band")
+    else:  # xodim telefon raqami va paroli bilan qo'shiladi - username avtomatik
+        base = re.sub(r"\D", "", data.get("phone") or "") or "xodim"
+        username, n = base, 1
+        while conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+            n += 1
+            username = f"{base}_{n}"
     # parol berilmasa - tasodifiy (xodim PIN bilan kiradi)
     pw, salt = hash_password(data.get("password") or secrets.token_urlsafe(16))
     cur = conn.execute(

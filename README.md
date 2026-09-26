@@ -21,9 +21,9 @@ Xatolar `cafepos.log` fayliga yoziladi.
 
 ### Kirish
 
-Kirish ekranida **PIN kod** (4 raqam) ekrandagi raqamlar bilan teriladi — klaviatura shart emas.
-Administratorning standart PIN kodi: **1234** (Sotuvchilar bo'limida o'zgartiring). Har bir xodimga
-PIN kod Sotuvchilar → xodimni tahrirlash orqali beriladi. "Login va parol bilan kirish" ham qolgan.
+Kirish ekranida **parol** (4 ta raqam) ekrandagi raqamlar bilan teriladi — klaviatura shart emas.
+Administratorning standart paroli: **1234** (Sotuvchilar bo'limida o'zgartiring).
+Xodim qo'shish: **Sotuvchilar → + Xodim qo'shish** — telefon raqami, ismi, paroli (4 raqam) va ruxsatlari.
 5 marta noto'g'ri terilsa, 1 daqiqa kutish kerak bo'ladi.
 
 ### Birinchi marta

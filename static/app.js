@@ -3,7 +3,7 @@
 
 const state = { user: null, categories: [], products: [], settings: { cafe_name: "CafePOS", service_percent: 0 } };
 
-const ROLE_NAMES = { admin: "Administrator", cashier: "Kassir", waiter: "Ofitsiant", cook: "Oshpaz" };
+const ROLE_NAMES = { admin: "Administrator", cashier: "Kassir", waiter: "Ofitsiant", cook: "Oshpaz", staff: "Xodim" };
 const PRINTER_KINDS = {
   system: "Kompyuterga ulangan (USB / Wi-Fi)",
   network: "Tarmoq termoprinteri (IP manzil)",
@@ -227,7 +227,10 @@ function showInstallHelp() {
 
 const PIN_LENGTH = 4;
 
-function renderLogin(withPassword) {
+const WEEKDAY_NAMES = ["Yakshanba", "Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba"];
+const MONTH_NAMES = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"];
+
+function renderLogin() {
   $("#app").innerHTML = `
     <div class="auth">
       <div class="auth-glow"></div>
@@ -236,50 +239,35 @@ function renderLogin(withPassword) {
         <h1>Kafengiz nazorat ostida<br><span>doim va hamma joyda</span></h1>
         <p>Stollar, buyurtmalar, oshxona va kassani yagona tizimda boshqaring</p>
       </section>
-      ${withPassword ? `
-      <form class="auth-card" id="login-form">
-        <div class="auth-card-brand"><img src="/img/logo-icon.png" alt=""><span>Cafe<b>Pos</b></span></div>
-        <h2>Kirish</h2>
-        <label><span>Foydalanuvchi nomi <em>*</em></span>
-          <input name="username" autocomplete="username" autocapitalize="off" required></label>
-        <label><span>Parol <em>*</em></span>
-          <input name="password" type="password" autocomplete="current-password" required></label>
-        <div class="error" id="login-error"></div>
-        <button class="auth-submit">Kirish</button>
-        <button type="button" class="auth-switch" id="to-pin">← PIN kod bilan kirish</button>
-      </form>` : `
-      <div class="auth-card pin-card" id="pin-card">
-        <div class="auth-card-brand"><img src="/img/logo-icon.png" alt=""><span>Cafe<b>Pos</b></span></div>
-        <h2>PIN kodni kiriting</h2>
+      <div class="pin-card" id="pin-card">
+        <div class="pin-clock"><b id="pin-time"></b><span id="pin-date"></span></div>
+        <h2>Xush kelibsiz</h2>
+        <p class="pin-sub">Parolingizni kiriting</p>
         <div class="pin-dots" id="pin-dots">${"<i></i>".repeat(PIN_LENGTH)}</div>
-        <div class="error" id="login-error"></div>
+        <div class="pin-error" id="login-error"></div>
         <div class="pin-pad">
           ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<button type="button" data-digit="${n}">${n}</button>`).join("")}
-          <button type="button" class="pin-fn" data-clear title="Tozalash">C</button>
+          <button type="button" class="pin-fn" data-clear aria-label="Tozalash">C</button>
           <button type="button" data-digit="0">0</button>
-          <button type="button" class="pin-fn" data-back title="O'chirish">⌫</button>
+          <button type="button" class="pin-fn" data-back aria-label="O'chirish">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 5H9l-7 7 7 7h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1Z"/><path d="m17 9-6 6M11 9l6 6"/></svg></button>
         </div>
-        <button type="button" class="auth-switch" id="to-password">Login va parol bilan kirish</button>
         ${installButton("auth-install")}
-      </div>`}
+      </div>
     </div>`;
   bindInstallButtons($("#app"));
-  const enter = async (body) => {
-    state.user = await api("POST", "/api/login", body);
-    await loadSettings();
-    if (!location.hash || location.hash === "#/") location.hash = defaultRoute();
-    document.removeEventListener("keydown", state.pinKeys);
-    router();
+  const tick = () => {
+    const el = $("#pin-time");
+    if (!el) return clearInterval(state.clock);
+    const d = new Date();
+    el.textContent = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    $("#pin-date").textContent = `${WEEKDAY_NAMES[d.getDay()]}, ${d.getDate()}-${MONTH_NAMES[d.getMonth()]}`;
   };
-  if (withPassword) {
-    $("#to-pin").addEventListener("click", () => renderLogin(false));
-    $("#login-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      try { await enter(formData(e.target)); } catch (err) { $("#login-error").textContent = err.message; }
-    });
-    $("input[name=username]").focus();
-    return;
-  }
+  clearInterval(state.clock);
+  state.clock = setInterval(tick, 10000);
+  tick();
+
   let pin = "";
   let busy = false;
   const dots = $("#pin-dots");
@@ -294,7 +282,12 @@ function renderLogin(withPassword) {
     if (pin.length < PIN_LENGTH) return;
     busy = true;
     try {
-      await enter({ pin });
+      state.user = await api("POST", "/api/login", { pin });
+      await loadSettings();
+      document.removeEventListener("keydown", state.pinKeys);
+      clearInterval(state.clock);
+      if (!location.hash || location.hash === "#/") location.hash = defaultRoute();
+      router();
     } catch (err) {
       $("#login-error").textContent = err.message;
       dots.classList.add("shake");
@@ -305,10 +298,6 @@ function renderLogin(withPassword) {
   $$("[data-digit]").forEach((b) => b.addEventListener("click", () => press(b.dataset.digit)));
   $("[data-back]").addEventListener("click", () => press("back"));
   $("[data-clear]").addEventListener("click", () => press("clear"));
-  $("#to-password").addEventListener("click", () => {
-    document.removeEventListener("keydown", state.pinKeys);
-    renderLogin(true);
-  });
   // Klaviatura bo'lsa - raqamlarni undan ham yozish mumkin
   document.removeEventListener("keydown", state.pinKeys);
   state.pinKeys = (e) => {
@@ -2213,13 +2202,6 @@ const PERMISSION_LIST = [
   ["journal", "journal", "Jurnal (barcha amallar)"],
   ["integrations", "plug", "Integratsiyalar (Telegram)"],
 ];
-const ROLE_DEFAULTS = {
-  admin: PERMISSION_LIST.map(([k]) => k),
-  cashier: ["tables", "cashier", "kitchen", "reports", "crm"],
-  waiter: ["tables"],
-  cook: ["kitchen"],
-};
-const ROLE_ICONS = { cashier: "cashier", waiter: "tables", cook: "kitchen", admin: "settings" };
 
 async function viewUsers() {
   const users = await api("GET", "/api/users");
@@ -2230,17 +2212,17 @@ async function viewUsers() {
     <div class="panel">
       <div class="toolbar"><h2>Xodimlar</h2><button class="btn primary" id="add">+ Xodim qo'shish</button></div>
       <table class="list users-table">
-        <thead><tr><th>#</th><th>Ismi</th><th>Username</th><th>Rol</th><th>Telefon</th><th>Ruxsatlar</th><th>Holati</th><th></th></tr></thead>
+        <thead><tr><th>#</th><th>Ismi</th><th>Telefon</th><th>Ruxsatlar</th><th>Parol</th><th>Holati</th><th></th></tr></thead>
         <tbody>
           ${users.map((u, i) => `
             <tr class="${u.active ? "" : "inactive"}">
               <td class="muted">${i + 1}</td>
               <td><div class="person"><span class="avatar-sm role-${u.role}">${esc(initials(u).toUpperCase())}</span>
                 ${esc(u.full_name)}</div></td>
-              <td><code>${esc(u.username)}</code></td>
-              <td><span class="role-badge role-${u.role}">${ROLE_NAMES[u.role]}</span></td>
               <td>${esc(u.phone || "—")}</td>
-              <td class="muted">${u.role === "admin" ? "Hammasi" : `${u.permissions.length} / ${PERMISSION_LIST.length}`}</td>
+              <td class="muted">${u.role === "admin" ? `<span class="role-badge role-admin">Administrator</span>`
+                : `${u.permissions.length} / ${PERMISSION_LIST.length}`}</td>
+              <td>${u.has_pin ? `<span class="muted">••••</span>` : `<span class="badge off">o'rnatilmagan</span>`}</td>
               <td>${u.active ? `<span class="badge">Faol</span>` : `<span class="badge off">Bloklangan</span>`}</td>
               <td class="right" style="white-space:nowrap">
                 <button class="btn small" data-edit="${u.id}">✏️</button>
@@ -2249,8 +2231,7 @@ async function viewUsers() {
             </tr>`).join("")}
         </tbody>
       </table>
-      <p class="muted users-summary">Jami: ${active.length} ta xodim ·
-        ${Object.keys(ROLE_NAMES).map((r) => `${ROLE_NAMES[r]}: ${count(r)}`).join(" · ")}</p>
+      <p class="muted users-summary">Jami: ${active.length} ta xodim · Administrator: ${count("admin")}</p>
     </div>`);
 
   $("#add", view).addEventListener("click", () => userForm());
@@ -2267,80 +2248,68 @@ async function viewUsers() {
 
 function userForm(u = null) {
   const isNew = !u;
-  u = u || { role: "cashier", permissions: ROLE_DEFAULTS.cashier, active: 1 };
-  const roles = Object.keys(ROLE_NAMES).filter((r) => r !== "admin" || state.user.role === "admin" || u.role === "admin");
+  u = u || { role: "staff", permissions: ["tables"], active: 1 };
+  const isAdmin = u.role === "admin";
+  const canAdmin = state.user.role === "admin";
+  const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.full_name || "";
   openModal(`
     <form id="f" class="user-form">
-      <div class="modal-head"><h2>${isNew ? "Yangi xodim qo'shish" : "Xodimni tahrirlash"}</h2>
+      <div class="modal-head"><h2>${isNew ? "Yangi xodim" : "Xodimni tahrirlash"}</h2>
         <button type="button" class="icon-btn" data-close aria-label="Yopish">✕</button></div>
-      <div class="grid-2">
-        <label><span>Ismi *</span><input name="first_name" value="${esc(u.first_name || "")}" required></label>
-        <label><span>Familiyasi</span><input name="last_name" value="${esc(u.last_name || "")}"></label>
-        <label><span>Username *</span><input name="username" value="${esc(u.username || "")}" ${isNew ? "required" : "disabled"}
-          autocomplete="off" autocapitalize="off"></label>
-        <label><span>${isNew ? "PIN kod * (4 raqam — shu bilan kiradi)" : "Yangi PIN kod"}${!isNew && u.has_pin ? "" : !isNew ? ` <em class="amount-out">o'rnatilmagan</em>` : ""}</span>
+      <div class="grid-3">
+        <label><span>Telefon raqami *</span><input name="phone" type="tel" required value="${esc(u.phone || "")}" placeholder="+998 90 123 45 67"></label>
+        <label><span>Ismi *</span><input name="name" required value="${esc(name)}" placeholder="Masalan: Aziz"></label>
+        <label><span>${isNew ? "Parol * (4 ta raqam)" : "Yangi parol"}${!isNew && !u.has_pin ? ` <em class="amount-out">o'rnatilmagan</em>` : ""}</span>
           <input name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" ${isNew ? "required" : ""}
-          placeholder="${isNew ? "Masalan: 2580" : "O'zgartirmaslik uchun bo'sh"}"></label>
-        <label><span>${isNew ? "Parol (ixtiyoriy)" : "Yangi parol"}</span><input name="password" type="password" minlength="4"
-          placeholder="${isNew ? "Login/parol bilan kirish uchun" : "O'zgartirmaslik uchun bo'sh"}" autocomplete="new-password"></label>
-      </div>
-      <div class="grid-2">
-        <div>
-          <span class="field-label">Rol *</span>
-          <div class="role-cards">
-            ${roles.map((r) => `
-              <label class="role-card"><input type="radio" name="role" value="${r}" ${r === u.role ? "checked" : ""}>
-                <span>${icon(ROLE_ICONS[r])}${ROLE_NAMES[r]}</span></label>`).join("")}
-          </div>
-        </div>
-        <label><span>Telefon</span><input name="phone" type="tel" value="${esc(u.phone || "")}" placeholder="+998 90 123 45 67"></label>
+            placeholder="${isNew ? "Masalan: 2580" : "O'zgartirmaslik uchun bo'sh"}"></label>
       </div>
       <div class="perm-head">
         <span class="field-label">🛡️ Bo'limlarga kirish ruxsati</span>
-        <small class="muted">Administrator = barcha bo'limlarga kiradi</small>
       </div>
       <div class="perm-box">
+        ${canAdmin || isAdmin ? `<label class="perm-item admin-toggle"><input type="checkbox" id="is-admin" ${isAdmin ? "checked" : ""}
+          ${u.id === state.user.id ? "disabled" : ""}>${icon("settings")}<span><b>Administrator</b> — barcha bo'limlarga kiradi</span></label>` : ""}
         <div class="perm-tools">
           <button type="button" class="btn small" id="perm-all">✅ Hammasini tanlash</button>
           <button type="button" class="btn small" id="perm-none">✖ Hammasini olib tashlash</button>
         </div>
         <div class="perm-grid">
-          ${PERMISSION_LIST.map(([k, ic, name]) => `
+          ${PERMISSION_LIST.map(([k, ic, pname]) => `
             <label class="perm-item"><input type="checkbox" name="perm" value="${k}" ${u.permissions.includes(k) ? "checked" : ""}>
-              ${icon(ic)}<span>${name}</span></label>`).join("")}
+              ${icon(ic)}<span>${pname}</span></label>`).join("")}
         </div>
       </div>
       ${isNew ? "" : `<label class="check-line"><input type="checkbox" name="active" ${u.active ? "checked" : ""}> Faol (tizimga kira oladi)</label>`}
       <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">💾 Saqlash</button></div>
     </form>`, (m) => {
     const boxes = $$("input[name=perm]", m);
-    const role = () => $("input[name=role]:checked", m).value;
+    const adminBox = $("#is-admin", m);
+    const admin = () => !!(adminBox && adminBox.checked);
     const syncAdmin = () => {
-      const admin = role() === "admin";
-      boxes.forEach((b) => { b.disabled = admin; if (admin) b.checked = true; });
-      $("#perm-all", m).disabled = $("#perm-none", m).disabled = admin;
+      boxes.forEach((b) => { b.disabled = admin(); if (admin()) b.checked = true; });
+      $("#perm-all", m).disabled = $("#perm-none", m).disabled = admin();
     };
-    $$("input[name=role]", m).forEach((r) => r.addEventListener("change", () => {
-      // Rol tanlanganda uning standart ruxsatlari belgilanadi, keyin qo'lda o'zgartirish mumkin
-      boxes.forEach((b) => { b.checked = ROLE_DEFAULTS[role()].includes(b.value); });
-      syncAdmin();
-    }));
+    if (adminBox) adminBox.addEventListener("change", syncAdmin);
     $("#perm-all", m).addEventListener("click", () => boxes.forEach((b) => { b.checked = true; }));
     $("#perm-none", m).addEventListener("click", () => boxes.forEach((b) => { b.checked = false; }));
     syncAdmin();
+    $("input[name=pin]", m).addEventListener("input", (e) => { e.target.value = e.target.value.replace(/\D/g, "").slice(0, 4); });
 
     $("#f", m).addEventListener("submit", safe(async (e) => {
       e.preventDefault();
       const f = e.target;
+      // eski rollar (kassir, ofitsiant...) saqlanadi; yangi xodim - "Xodim"
+      const role = admin() ? "admin" : (u.role && u.role !== "admin" ? u.role : "staff");
       const data = {
-        first_name: f.first_name.value, last_name: f.last_name.value, phone: f.phone.value,
-        role: role(), permissions: boxes.filter((b) => b.checked).map((b) => b.value),
+        first_name: f.name.value.trim(), last_name: "", phone: f.phone.value,
+        role, permissions: boxes.filter((b) => b.checked).map((b) => b.value),
       };
       if (!data.permissions.length) throw new Error("Kamida bitta bo'limga ruxsat bering");
-      if (f.password.value) data.password = f.password.value;
-      if (f.pin.value) data.pin = f.pin.value;
-      if (isNew) data.username = f.username.value;
-      else data.active = f.active.checked;
+      if (f.pin.value) {
+        if (!/^\d{4}$/.test(f.pin.value)) throw new Error("Parol 4 ta raqam bo'lishi kerak");
+        data.pin = f.pin.value;
+      }
+      if (!isNew) data.active = f.active.checked;
       await api(isNew ? "POST" : "PUT", "/api/users" + (isNew ? "" : "/" + u.id), data);
       closeModal();
       toast("Saqlandi ✅");
