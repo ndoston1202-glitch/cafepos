@@ -20,8 +20,10 @@ from datetime import datetime, timedelta
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+from xml.etree import ElementTree
 
 import printing
+import xlsx
 from printing import PrintError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -53,6 +55,7 @@ FINANCE_ACCOUNTS = ("cash", "card", "payme", "click", "bank")
 DEBT_PAY_METHODS = {"cash": "cash", "click": "card", "terminal": "bank", "transfer": "bank"}
 DUE_SOON_DAYS = 3
 SYSTEM_FINANCE_TYPES = (("Mijoz balansini to'ldirish", "in"), ("Ta'minotchiga pul berish", "out"))
+ADJUST_TYPES = {"in": "Kassa balansini tuzatish (+)", "out": "Kassa balansini tuzatish (-)"}
 PRINTER_KINDS = ("system", "network", "windows")  # windows = eski versiyadagi ulashilgan printer
 
 db_lock = threading.Lock()
@@ -201,6 +204,25 @@ CREATE TABLE IF NOT EXISTS debt_payments (
     cancel_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_debts_customer ON debts(customer_id);
+CREATE TABLE IF NOT EXISTS suppliers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    phone TEXT,
+    created_at TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id)
+);
+-- Balansni o'rnatish tarixi (kassa hisobi / mijoz / ta'minotchi). O'chirilmaydi.
+CREATE TABLE IF NOT EXISTS balance_adjustments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT NOT NULL,              -- account / customer / supplier
+    target_id INTEGER,
+    account TEXT,
+    old_balance INTEGER NOT NULL,
+    new_balance INTEGER NOT NULL,
+    comment TEXT,
+    created_at TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id)
+);
 """
 
 # Eski bazalarga yangi ustunlar qo'shiladi (ma'lumot o'chmaydi)
@@ -215,6 +237,8 @@ MIGRATIONS = [
     ("orders", "refunded_at", "TEXT"),
     ("orders", "refunded_by", "INTEGER REFERENCES users(id)"),
     ("orders", "refund_reason", "TEXT"),
+    ("finance_types", "is_adjust", "INTEGER NOT NULL DEFAULT 0"),  # balans tuzatish turlari
+    ("finance_entries", "supplier_id", "INTEGER REFERENCES suppliers(id)"),
     ("users", "first_name", "TEXT"),
     ("users", "last_name", "TEXT"),
     ("users", "phone", "TEXT"),
@@ -276,12 +300,13 @@ def init_db(conn):
         for i in range(1, 9):
             conn.execute("INSERT INTO tables (name, seats) VALUES (?, ?)", (f"Stol {i}", 4))
     # Bazaviy tranzaksiya turlari doim bo'ladi
-    for name, direction in SYSTEM_FINANCE_TYPES:
+    for name, direction in SYSTEM_FINANCE_TYPES + tuple((n, d) for d, n in ADJUST_TYPES.items()):
         conn.execute(
             """INSERT OR IGNORE INTO finance_types (name, direction, is_system, created_at)
                VALUES (?, ?, 1, ?)""",
             (name, direction, now()),
         )
+    conn.executemany("UPDATE finance_types SET is_adjust = 1 WHERE name = ?", [(n,) for n in ADJUST_TYPES.values()])
     if conn.execute("SELECT COUNT(*) FROM halls").fetchone()[0] == 0:
         seed_halls(conn)
     conn.commit()
@@ -306,6 +331,13 @@ class ApiError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+class FileResponse:
+    """Fayl yuklab berish (masalan, import shabloni)."""
+
+    def __init__(self, content, filename, ctype):
+        self.content, self.filename, self.ctype = content, filename, ctype
 
 
 class Deferred:
@@ -1320,11 +1352,16 @@ def create_finance_entry(conn, user, params, data, query):
     if data["account"] not in FINANCE_ACCOUNTS:
         raise ApiError(400, "Hisobni tanlang (naqd, karta...)")
     amount = to_int(data["amount"], "amount", 1)
+    supplier_id = data.get("supplier_id") or None
+    if supplier_id:
+        if ftype["direction"] != "out":
+            raise ApiError(400, "Ta'minotchi faqat chiqimda tanlanadi")
+        get_supplier(conn, supplier_id)
     cur = conn.execute(
-        """INSERT INTO finance_entries (type_id, direction, account, amount, comment, created_at, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO finance_entries (type_id, direction, account, amount, comment, created_at, created_by, supplier_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (ftype["id"], ftype["direction"], data["account"], amount,
-         (data.get("comment") or "").strip() or None, now(), user["id"]),
+         (data.get("comment") or "").strip() or None, now(), user["id"], supplier_id),
     )
     return {"id": cur.lastrowid, "balance": finance_balance(conn)}
 
@@ -1381,11 +1418,13 @@ def list_finance_entries(conn, user, params, data, query):
     entries = []
     if source in ("all", "manual"):
         entries += [dict(r, source="manual") for r in conn.execute(
-            """SELECT e.id, e.direction, e.account, e.amount, e.comment, e.status, e.created_at,
-                      e.cancelled_at, e.cancel_reason, t.name AS type_name,
+            """SELECT e.id, e.direction, e.account, e.amount,
+                      COALESCE(s.name || COALESCE(' · ' || e.comment, ''), e.comment) AS comment,
+                      e.status, e.created_at, e.cancelled_at, e.cancel_reason, t.name AS type_name,
                       u.full_name AS user_name, cu.full_name AS cancelled_by_name
                FROM finance_entries e
                JOIN finance_types t ON t.id = e.type_id
+               LEFT JOIN suppliers s ON s.id = e.supplier_id
                LEFT JOIN users u ON u.id = e.created_by
                LEFT JOIN users cu ON cu.id = e.cancelled_by
                WHERE e.created_at BETWEEN ? AND ?""", rng)]
@@ -1411,7 +1450,7 @@ def list_finance_entries(conn, user, params, data, query):
                JOIN customers c ON c.id = p.customer_id
                LEFT JOIN users u ON u.id = p.created_by
                LEFT JOIN users cu ON cu.id = p.cancelled_by
-               WHERE p.created_at BETWEEN ? AND ?""", rng)]
+               WHERE p.account != 'adjust' AND p.created_at BETWEEN ? AND ?""", rng)]
     if direction:
         entries = [e for e in entries if e["direction"] == direction]
     if account:
@@ -1424,6 +1463,318 @@ def list_finance_entries(conn, user, params, data, query):
         "total_in": sum(e["amount"] for e in done if e["direction"] == "in"),
         "total_out": sum(e["amount"] for e in done if e["direction"] == "out"),
     }
+
+
+# --- ta'minotchilar va balansni o'rnatish
+
+
+def get_supplier(conn, supplier_id):
+    row = conn.execute("SELECT * FROM suppliers WHERE id = ?", (supplier_id or 0,)).fetchone()
+    if not row:
+        raise ApiError(404, "Ta'minotchi topilmadi")
+    return dict(row)
+
+
+def supplier_balances(conn):
+    """Musbat balans - biz ta'minotchiga qarzdormiz."""
+    return rows(conn.execute(
+        """SELECT s.*,
+                  COALESCE((SELECT SUM(new_balance - old_balance) FROM balance_adjustments a
+                            WHERE a.target = 'supplier' AND a.target_id = s.id), 0)
+                - COALESCE((SELECT SUM(amount) FROM finance_entries e
+                            WHERE e.supplier_id = s.id AND e.status = 'done' AND e.direction = 'out'), 0) AS balance
+           FROM suppliers s ORDER BY s.name"""
+    ))
+
+
+def customer_remaining(conn, customer_id):
+    return sum(d["remaining"] for d in debts_query(conn, "AND d.customer_id = ?", (customer_id,)))
+
+
+def record_adjustment(conn, user, target, target_id, account, old, new, comment):
+    conn.execute(
+        """INSERT INTO balance_adjustments (target, target_id, account, old_balance, new_balance, comment, created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (target, target_id, account, old, new, comment, now(), user["id"]),
+    )
+
+
+def new_balance_value(data, minimum=None):
+    try:
+        value = int(float(str(data.get("balance", "")).replace(" ", "").replace(",", ".")))
+    except ValueError:
+        raise ApiError(400, "Yangi balansni son bilan kiriting")
+    if minimum is not None and value < minimum:
+        raise ApiError(400, "Balans manfiy bo'lishi mumkin emas")
+    return value
+
+
+@route("GET", "/api/suppliers", ("finance",))
+def list_suppliers(conn, user, params, data, query):
+    return supplier_balances(conn)
+
+
+@route("POST", "/api/suppliers", ("finance",))
+def create_supplier(conn, user, params, data, query):
+    name = clean_name(data.get("name"))
+    if len(name) < 2:
+        raise ApiError(400, "Ta'minotchi nomini kiriting")
+    if conn.execute("SELECT 1 FROM suppliers WHERE name = ? COLLATE NOCASE", (name,)).fetchone():
+        raise ApiError(409, f"\"{name}\" nomli ta'minotchi allaqachon bor")
+    phone = normalize_phone(data["phone"]) if (data.get("phone") or "").strip() else None
+    cur = conn.execute(
+        "INSERT INTO suppliers (name, phone, created_at, created_by) VALUES (?, ?, ?, ?)",
+        (name, phone, now(), user["id"]),
+    )
+    return get_supplier(conn, cur.lastrowid)
+
+
+@route("GET", "/api/balances", ("finance",))
+def get_balances(conn, user, params, data, query):
+    customers = rows(conn.execute("SELECT id, name, phone FROM customers ORDER BY name"))
+    for c in customers:
+        c["balance"] = customer_remaining(conn, c["id"])
+    history = rows(conn.execute(
+        """SELECT a.*, u.full_name AS user_name,
+                  CASE a.target WHEN 'customer' THEN (SELECT name FROM customers WHERE id = a.target_id)
+                                WHEN 'supplier' THEN (SELECT name FROM suppliers WHERE id = a.target_id) END AS target_name
+           FROM balance_adjustments a LEFT JOIN users u ON u.id = a.created_by
+           ORDER BY a.id DESC LIMIT 100"""
+    ))
+    return {"accounts": finance_balance(conn), "customers": customers,
+            "suppliers": supplier_balances(conn), "history": history}
+
+
+@route("POST", "/api/balances/account", ("finance",))
+def set_account_balance(conn, user, params, data, query):
+    account = data.get("account")
+    if account not in FINANCE_ACCOUNTS:
+        raise ApiError(400, "Hisobni tanlang")
+    new = new_balance_value(data)
+    old = next(a["balance"] for a in finance_balance(conn)["accounts"] if a["account"] == account)
+    if new == old:
+        raise ApiError(400, "Balans o'zgarmadi")
+    direction = "in" if new > old else "out"
+    type_id = conn.execute("SELECT id FROM finance_types WHERE name = ?", (ADJUST_TYPES[direction],)).fetchone()[0]
+    comment = (data.get("comment") or "").strip() or None
+    conn.execute(
+        """INSERT INTO finance_entries (type_id, direction, account, amount, comment, created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (type_id, direction, account, abs(new - old), comment or "Balans o'rnatish", now(), user["id"]),
+    )
+    record_adjustment(conn, user, "account", None, account, old, new, comment)
+    return {"old": old, "new": new}
+
+
+@route("POST", "/api/balances/customer", ("finance",))
+def set_customer_balance(conn, user, params, data, query):
+    customer = get_customer(conn, data.get("customer_id"))
+    new = new_balance_value(data, minimum=0)
+    old = customer_remaining(conn, customer["id"])
+    if new == old:
+        raise ApiError(400, "Balans o'zgarmadi")
+    comment = (data.get("comment") or "").strip() or None
+    if new > old:  # qarz ko'paydi - yangi qarz yoziladi
+        due = parse_due_date(data["due_date"]) if data.get("due_date") else (
+            datetime.now().date() + timedelta(days=30)).isoformat()
+        conn.execute(
+            """INSERT INTO debts (customer_id, amount, due_date, comment, created_at, created_by)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (customer["id"], new - old, due, comment or "Balans o'rnatish", now(), user["id"]),
+        )
+    else:  # qarz kamaydi - eng eski qarzlardan boshlab tuzatiladi (kassaga pul tushmaydi)
+        left = old - new
+        for d in debts_query(conn, "AND d.customer_id = ? AND d.status = 'open'", (customer["id"],)):
+            if left <= 0:
+                break
+            part = min(left, d["remaining"])
+            if part <= 0:
+                continue
+            conn.execute(
+                """INSERT INTO debt_payments (debt_id, customer_id, amount, method, account, created_at, created_by)
+                   VALUES (?, ?, ?, 'adjust', 'adjust', ?, ?)""",
+                (d["id"], customer["id"], part, now(), user["id"]),
+            )
+            if part == d["remaining"]:
+                conn.execute("UPDATE debts SET status = 'closed' WHERE id = ?", (d["id"],))
+            left -= part
+    record_adjustment(conn, user, "customer", customer["id"], None, old, new, comment)
+    return {"old": old, "new": new}
+
+
+@route("POST", "/api/balances/supplier", ("finance",))
+def set_supplier_balance(conn, user, params, data, query):
+    supplier = get_supplier(conn, data.get("supplier_id"))
+    new = new_balance_value(data)
+    old = next(s["balance"] for s in supplier_balances(conn) if s["id"] == supplier["id"])
+    if new == old:
+        raise ApiError(400, "Balans o'zgarmadi")
+    record_adjustment(conn, user, "supplier", supplier["id"], None, old, new, (data.get("comment") or "").strip() or None)
+    return {"old": old, "new": new}
+
+
+# --- import (bir nechta mahsulot / mijozni fayl orqali qo'shish)
+
+IMPORT_TEMPLATES = {
+    "products": {
+        "perm": "menu",
+        "file": "CafePOS_mahsulotlar_shablon.xlsx",
+        "headers": ["Nomi*", "Kategoriya", "Sotish narxi*", "Tannarxi", "Printer"],
+        "widths": [28, 22, 16, 14, 16],
+        "rows": [["Osh", "Taomlar", 35000, 18000, "Oshxona"], ["Choy", "Issiq ichimliklar", 5000, 1000, ""]],
+        "notes": ["# * - majburiy ustun. Namuna qatorlarni o'chirib, o'z mahsulotlaringizni yozing.",
+                  "# Yangi kategoriya avtomatik yaratiladi. Printer nomi dasturdagi bilan bir xil bo'lsin.",
+                  "# Shu nomli mahsulot bor bo'lsa - narxi va kategoriyasi yangilanadi."],
+        "fields": {"name": ("nomi", "name", "mahsulot", "taom"), "category": ("kategoriya", "category"),
+                   "price": ("sotish narxi", "narxi", "narx", "price"), "cost": ("tannarxi", "tannarx", "cost"),
+                   "printer": ("printer",)},
+    },
+    "customers": {
+        "perm": "crm",
+        "file": "CafePOS_mijozlar_shablon.xlsx",
+        "headers": ["Ismi*", "Telefon*", "Jinsi*"],
+        "widths": [28, 22, 12],
+        "rows": [["Ali Valiyev", "+998 90 123 45 67", "Erkak"], ["Zarina Karimova", "93 555 66 77", "Ayol"]],
+        "notes": ["# * - majburiy ustun. Jinsi: Erkak yoki Ayol.",
+                  "# Shu telefon raqamli mijoz bor bo'lsa - ismi va jinsi yangilanadi."],
+        "fields": {"name": ("ismi", "ism", "name", "mijoz"), "phone": ("telefon", "telefon raqami", "phone"),
+                   "gender": ("jinsi", "jins", "gender")},
+    },
+}
+
+
+def import_spec(kind, user):
+    spec = IMPORT_TEMPLATES.get(kind)
+    if not spec:
+        raise ApiError(404, "Topilmadi")
+    if spec["perm"] not in user["permissions"]:
+        raise ApiError(403, "Bu bo'limga ruxsatingiz yo'q")
+    return spec
+
+
+@route("GET", r"/api/import/(products|customers)/template")
+def import_template(conn, user, params, data, query):
+    spec = import_spec(params[0], user)
+    content = xlsx.write_xlsx(spec["headers"], spec["rows"], spec["widths"], notes=spec["notes"])
+    return FileResponse(content, spec["file"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def parse_money(value, field, required):
+    text = re.sub(r"[\s'`]|so.?m|sum", "", str(value or "").lower()).replace(",", ".")
+    if not text:
+        if required:
+            raise ApiError(400, f"{field} yozilmagan")
+        return 0
+    try:
+        n = int(round(float(text)))
+    except ValueError:
+        raise ApiError(400, f"{field} son emas: {value}")
+    if n < 0:
+        raise ApiError(400, f"{field} manfiy bo'lishi mumkin emas")
+    return n
+
+
+def parse_gender(value):
+    v = (value or "").strip().lower()
+    if v[:1] in ("e", "m") or v.startswith(("муж", "male")):
+        return "m"
+    if v[:1] in ("a", "f", "w", "ж") or v.startswith("жен"):
+        return "f"
+    raise ApiError(400, f"Jinsi noto'g'ri: \"{value}\" (Erkak yoki Ayol yozing)")
+
+
+def import_product(conn, user, rec, categories, printers):
+    name = clean_name(rec.get("name"))
+    if not name:
+        raise ApiError(400, "Nomi yozilmagan")
+    price = parse_money(rec.get("price"), "Sotish narxi", True)
+    cost = parse_money(rec.get("cost"), "Tannarxi", False)
+    cat_id = None
+    cat_name = clean_name(rec.get("category"))
+    if cat_name:
+        cat_id = categories.get(cat_name.lower())
+        if not cat_id:
+            cat_id = conn.execute("INSERT INTO categories (name, sort) VALUES (?, ?)", (cat_name, len(categories))).lastrowid
+            categories[cat_name.lower()] = cat_id
+    printer_id = None
+    printer_name = clean_name(rec.get("printer"))
+    if printer_name:
+        printer_id = printers.get(printer_name.lower())
+        if not printer_id:
+            raise ApiError(400, f"\"{printer_name}\" printeri topilmadi (Sozlamalar > Printerlar)")
+    existing = conn.execute(
+        "SELECT id FROM products WHERE name = ? COLLATE NOCASE AND active = 1", (name,)
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE products SET category_id = COALESCE(?, category_id), price = ?, cost = ?, "
+            "printer_id = COALESCE(?, printer_id) WHERE id = ?",
+            (cat_id, price, cost, printer_id, existing["id"]),
+        )
+        return "updated"
+    conn.execute(
+        "INSERT INTO products (category_id, name, price, cost, printer_id) VALUES (?,?,?,?,?)",
+        (cat_id, name, price, cost, printer_id),
+    )
+    return "created"
+
+
+def import_customer(conn, user, rec):
+    name, phone, gender = clean_name(rec.get("name")), rec.get("phone"), parse_gender(rec.get("gender"))
+    if len(name) < 2:
+        raise ApiError(400, "Ismi yozilmagan")
+    phone = normalize_phone(phone)
+    existing = conn.execute("SELECT id FROM customers WHERE phone = ?", (phone,)).fetchone()
+    if existing:
+        conn.execute("UPDATE customers SET name = ?, gender = ? WHERE id = ?", (name, gender, existing["id"]))
+        return "updated"
+    conn.execute(
+        "INSERT INTO customers (name, phone, gender, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+        (name, phone, gender, now(), user["id"]),
+    )
+    return "created"
+
+
+@route("POST", r"/api/import/(products|customers)")
+def import_file(conn, user, params, data, query):
+    kind = params[0]
+    spec = import_spec(kind, user)
+    try:
+        content = base64.b64decode(str(data.get("data", "")).split(",")[-1])
+        headers, table = xlsx.read_table(content, data.get("file_name") or "")
+    except (ValueError, xlsx.TableError, ElementTree.ParseError) as e:
+        raise ApiError(400, f"Faylni o'qib bo'lmadi: {e}")
+    columns = {}
+    for field, aliases in spec["fields"].items():
+        for i, h in enumerate(headers):
+            if h in aliases:
+                columns[field] = i
+                break
+    required = [f for f, a in spec["fields"].items() if spec["headers"][list(spec["fields"]).index(f)].endswith("*")]
+    missing = [spec["headers"][list(spec["fields"]).index(f)].rstrip("*") for f in required if f not in columns]
+    if missing:
+        raise ApiError(400, "Faylda ustun topilmadi: " + ", ".join(missing) + ". Shablondan foydalaning")
+    if not table:
+        raise ApiError(400, "Faylda ma'lumot qatori yo'q")
+    if len(table) > 5000:
+        raise ApiError(400, "Bir martada 5000 qatordan ko'p bo'lmasin")
+
+    categories = {r["name"].lower(): r["id"] for r in conn.execute("SELECT id, name FROM categories")}
+    printers = {r["name"].lower(): r["id"] for r in conn.execute("SELECT id, name FROM printers WHERE active = 1")}
+    result = {"created": 0, "updated": 0, "errors": []}
+    for row_no, values in table:
+        rec = {f: values[i] if i < len(values) else "" for f, i in columns.items()}
+        conn.execute("SAVEPOINT import_row")
+        try:
+            status = (import_product(conn, user, rec, categories, printers) if kind == "products"
+                      else import_customer(conn, user, rec))
+            conn.execute("RELEASE import_row")
+            result[status] += 1
+        except ApiError as e:
+            conn.execute("ROLLBACK TO import_row")
+            conn.execute("RELEASE import_row")
+            result["errors"].append({"row": row_no, "message": e.message})
+    return result
 
 
 # --- bosh sahifa (savdo ko'rsatkichlari)
@@ -1750,6 +2101,15 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- javob yuborish
 
+    def send_file(self, f):
+        self.send_response(200)
+        self.send_header("Content-Type", f.ctype)
+        self.send_header("Content-Length", str(len(f.content)))
+        self.send_header("Content-Disposition", f'attachment; filename="{f.filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(f.content)
+
     def send_json(self, status, payload, headers=None):
         body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
@@ -1837,6 +2197,8 @@ class Handler(BaseHTTPRequestHandler):
             status, payload, headers = result
             if isinstance(payload, Deferred):
                 payload = payload.fn()
+            if isinstance(payload, FileResponse):
+                return self.send_file(payload)
             self.send_json(status, payload, headers)
         except ApiError as e:
             self.send_json(e.status, {"error": e.message})

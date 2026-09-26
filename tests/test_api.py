@@ -669,6 +669,105 @@ class ApiTest(unittest.TestCase):
         # Ofitsiantda CRM ruxsati yo'q
         self.assertEqual(self.waiter.call("GET", "/api/debts")[0], 403)
 
+    def upload(self, client, kind, content, name="fayl.xlsx"):
+        return client.call("POST", f"/api/import/{kind}", {"file_name": name, "data": base64.b64encode(content).decode()})
+
+    def test_import_template_and_products(self):
+        import xlsx
+        from urllib.request import Request
+        # Shablon - haqiqiy xlsx, o'zimiz o'qiy olamiz
+        req = Request(self.base + "/api/import/products/template")
+        with self.admin.opener.open(req) as res:
+            self.assertIn("spreadsheetml", res.headers["Content-Type"])
+            template = res.read()
+        headers, rows = xlsx.read_table(template)
+        self.assertEqual(headers[:3], ["nomi", "kategoriya", "sotish narxi"])
+        self.assertEqual(len(rows), 2)  # izoh qatorlari (#) o'tkazib yuboriladi
+
+        content = xlsx.write_xlsx(
+            ["Nomi*", "Kategoriya", "Sotish narxi*", "Tannarxi", "Printer"],
+            [["Import Somsa", "Import Kategoriya", "8 000", "3000", ""],
+             ["Import Manti", "Import Kategoriya", 12000, "", ""],
+             ["", "X", 1000, "", ""],                       # nomi yo'q
+             ["Import Xato", "", "abc", "", ""],             # narx son emas
+             ["Import Printersiz", "", 5000, "", "Yo'q printer"]])
+        status, res = self.upload(self.admin, "products", content)
+        self.assertEqual(status, 200)
+        self.assertEqual((res["created"], res["updated"]), (2, 0))
+        self.assertEqual([e["row"] for e in res["errors"]], [4, 5, 6])
+        _, products = self.admin.call("GET", "/api/products")
+        somsa = next(p for p in products if p["name"] == "Import Somsa")
+        self.assertEqual((somsa["price"], somsa["cost"], somsa["category_name"]), (8000, 3000, "Import Kategoriya"))
+
+        # Qayta yuklansa - yangilanadi, dublikat bo'lmaydi
+        again = xlsx.write_xlsx(["Nomi", "Sotish narxi"], [["import somsa", 9000]])
+        _, res = self.upload(self.admin, "products", again)
+        self.assertEqual((res["created"], res["updated"]), (0, 1))
+        _, products = self.admin.call("GET", "/api/products")
+        self.assertEqual(sum(1 for p in products if p["name"].lower() == "import somsa"), 1)
+
+        # CSV ham qabul qilinadi; ustun yetishmasa - tushunarli xato
+        _, res = self.upload(self.admin, "products", "Nomi;Sotish narxi\nImport CSV;7000\n".encode(), "a.csv")
+        self.assertEqual(res["created"], 1)
+        status, err = self.upload(self.admin, "products", xlsx.write_xlsx(["Nomi"], [["X"]]))
+        self.assertEqual(status, 400)
+        self.assertIn("Sotish narxi", err["error"])
+        self.assertEqual(self.upload(self.admin, "products", b"not a real file at all")[0], 400)
+        self.assertEqual(self.upload(self.waiter, "products", again)[0], 403)
+
+    def test_import_customers(self):
+        import xlsx
+        content = xlsx.write_xlsx(["Ismi*", "Telefon*", "Jinsi*"], [
+            ["Import Ali", "90 700 00 01", "Erkak"],
+            ["Import Laylo", "+998 90 700 00 02", "ayol"],
+            ["Import Xato", "12", "Erkak"],
+            ["Import Jins", "90 700 00 03", "?"],
+        ])
+        _, res = self.upload(self.admin, "customers", content)
+        self.assertEqual((res["created"], len(res["errors"])), (2, 2))
+        _, found = self.admin.call("GET", "/api/customers?q=Import")
+        self.assertEqual({c["name"]: c["gender"] for c in found}, {"Import Ali": "m", "Import Laylo": "f"})
+        _, res = self.upload(self.admin, "customers", xlsx.write_xlsx(["Ismi", "Telefon", "Jinsi"], [["Ali Yangi", "907000001", "E"]]))
+        self.assertEqual(res["updated"], 1)
+
+    def test_set_balances(self):
+        _, b = self.admin.call("GET", "/api/balances")
+        cash = next(a for a in b["accounts"]["accounts"] if a["account"] == "cash")["balance"]
+        # Kassa: yangi balans o'rnatiladi, farq tuzatish yozuvi bo'ladi
+        _, r = self.admin.call("POST", "/api/balances/account", {"account": "cash", "balance": cash + 500000, "comment": "Boshlang'ich qoldiq"})
+        self.assertEqual((r["old"], r["new"]), (cash, cash + 500000))
+        self.admin.call("POST", "/api/balances/account", {"account": "cash", "balance": cash + 400000})
+        _, b = self.admin.call("GET", "/api/balances")
+        self.assertEqual(next(a for a in b["accounts"]["accounts"] if a["account"] == "cash")["balance"], cash + 400000)
+        self.assertEqual(self.admin.call("POST", "/api/balances/account", {"account": "cash", "balance": cash + 400000})[0], 400)
+        # Tuzatish turlari kirim/chiqim oynasida tanlanmaydi (is_adjust)
+        _, types = self.admin.call("GET", "/api/finance/types")
+        self.assertEqual(sum(t["is_adjust"] for t in types), 2)
+
+        # Mijoz: qarz 0 -> 80000 -> 30000
+        _, c = self.admin.call("POST", "/api/customers", {"name": "Balans Mijoz", "phone": "907771122", "gender": "m"})
+        self.admin.call("POST", "/api/balances/customer", {"customer_id": c["id"], "balance": 80000})
+        _, r = self.admin.call("POST", "/api/balances/customer", {"customer_id": c["id"], "balance": 30000})
+        self.assertEqual((r["old"], r["new"]), (80000, 30000))
+        _, card = self.admin.call("GET", f"/api/customers/{c['id']}")
+        self.assertEqual(card["remaining"], 30000)
+        self.assertEqual(self.admin.call("POST", "/api/balances/customer", {"customer_id": c["id"], "balance": -5})[0], 400)
+        _, b2 = self.admin.call("GET", "/api/balances")
+        self.assertEqual(b2["accounts"]["total"], b["accounts"]["total"])  # mijoz tuzatishi kassaga ta'sir qilmaydi
+
+        # Ta'minotchi: yaratish (dublikatsiz), balans, chiqim bilan kamayadi
+        _, sup = self.admin.call("POST", "/api/suppliers", {"name": "Go'sht do'koni", "phone": "901112233"})
+        self.assertEqual(self.admin.call("POST", "/api/suppliers", {"name": "go'sht  DO'KONI"})[0], 409)
+        self.admin.call("POST", "/api/balances/supplier", {"supplier_id": sup["id"], "balance": 1000000})
+        _, types = self.admin.call("GET", "/api/finance/types")
+        pay_type = next(t for t in types if t["name"] == "Ta'minotchiga pul berish")
+        self.admin.call("POST", "/api/finance/entries", {"type_id": pay_type["id"], "account": "cash", "amount": 250000, "supplier_id": sup["id"]})
+        _, sups = self.admin.call("GET", "/api/suppliers")
+        self.assertEqual(next(x for x in sups if x["id"] == sup["id"])["balance"], 750000)
+        _, b3 = self.admin.call("GET", "/api/balances")
+        self.assertEqual([h["target"] for h in b3["history"][:4]], ["supplier", "customer", "customer", "account"])
+        self.assertEqual(self.cashier.call("GET", "/api/balances")[0], 403)
+
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})

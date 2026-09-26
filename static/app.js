@@ -319,6 +319,9 @@ const ICONS = {
   terminal: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M8 6h8v4H8zM8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"/>',
   transfer: '<path d="M4 7h14l-3-3M20 17H6l3 3"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  upload: '<path d="M12 16V4M6 10l6-6 6 6M4 20h16"/>',
+  download: '<path d="M12 4v12M6 10l6 6 6-6M4 20h16"/>',
+  scale: '<path d="M12 3v18M5 7h14M5 7l-3 7a4 4 0 0 0 6 0Zm14 0-3 7a4 4 0 0 0 6 0ZM8 21h8"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   in: '<path d="M12 5v14M5 12l7 7 7-7"/>',
   out: '<path d="M12 19V5M5 12l7-7 7 7"/>',
@@ -350,6 +353,7 @@ const NAV = [
     { perm: "finance", href: "#/finance", icon: "cashier", name: "Kassa" },
     { perm: "finance", href: "#/finance/entries", icon: "list", name: "Tranzaksiyalar" },
     { perm: "finance", href: "#/finance/types", icon: "plus", name: "Tranzaksiya yaratish" },
+    { perm: "finance", href: "#/finance/balances", icon: "scale", name: "Balansni o'rnatish" },
   ] },
 ];
 // Sozlamalar alohida: yuqori o'ngdagi tugma, ichida yorliqlar
@@ -1155,7 +1159,9 @@ async function viewCustomers() {
   const view = layout(`
     <div class="crm-layout">
       <div class="panel customer-list">
-        <div class="toolbar"><h2 style="flex:1">Mijozlar</h2><button class="btn primary small" id="new-customer">+ Yangi</button></div>
+        <div class="toolbar"><h2 style="flex:1">Mijozlar</h2>
+          <button class="btn small" id="import-customers" title="Import">${icon("upload")}</button>
+          <button class="btn primary small" id="new-customer">+ Yangi</button></div>
         <form id="search" class="picker-search">${icon("search")}<input name="q" value="${esc(q)}" placeholder="Ism yoki telefon"></form>
         <div class="customer-items">
           ${list.map((c) => `
@@ -1178,6 +1184,7 @@ async function viewCustomers() {
   });
   const newBtn = () => go("#/crm/customers?mode=new" + (q ? "&q=" + encodeURIComponent(q) : ""));
   $("#new-customer", view).addEventListener("click", newBtn);
+  $("#import-customers", view).addEventListener("click", () => importModal("customers", "Mijozlarni import qilish", () => router()));
   const n2 = $("#new-customer-2", view);
   if (n2) n2.addEventListener("click", newBtn);
   const form = $("#customer-form", view);
@@ -1282,6 +1289,190 @@ async function viewDebts() {
     payDebtModal(data.debts.find((d) => d.id === +b.dataset.pay), null, () => viewDebts())));
 }
 
+// ------------------------------------------------------------ import (Excel shablon orqali)
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error("Faylni o'qib bo'lmadi"));
+    r.readAsDataURL(file);
+  });
+}
+
+function importModal(kind, title, onDone) {
+  openModal(`
+    <div class="modal-head"><h2>${title}</h2><button type="button" class="icon-btn" data-close>✕</button></div>
+    <ol class="import-steps">
+      <li><b>Shablonni yuklab oling</b> va Excel'da oching
+        <a class="btn small" href="/api/import/${kind}/template" download>${icon("download")} Shablon (.xlsx)</a></li>
+      <li><b>To'ldiring</b> — har bir qator bitta ${kind === "products" ? "mahsulot" : "mijoz"}, namuna qatorlarni o'chiring</li>
+      <li><b>Saqlab, shu yerga yuklang</b> (.xlsx yoki .csv)</li>
+    </ol>
+    <label class="file-drop" id="drop">
+      ${icon("upload")}<b>Faylni tanlang</b><small>yoki shu yerga tashlang</small>
+      <input type="file" id="import-file" accept=".xlsx,.csv" hidden>
+    </label>
+    <div id="import-result"></div>
+    <div class="actions"><button class="btn" data-close>Yopish</button></div>`, (m) => {
+    const input = $("#import-file", m);
+    const drop = $("#drop", m);
+    const upload = safe(async (file) => {
+      if (!file) return;
+      const box = $("#import-result", m);
+      box.innerHTML = `<p class="muted">Yuklanmoqda: ${esc(file.name)}...</p>`;
+      let res;
+      try {
+        res = await api("POST", `/api/import/${kind}`, { file_name: file.name, data: await readFileAsDataURL(file) });
+      } catch (e) {
+        box.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+        return;
+      }
+      box.innerHTML = `
+        <div class="import-summary">
+          <div><b class="amount-in">${res.created}</b><span>yangi qo'shildi</span></div>
+          <div><b>${res.updated}</b><span>yangilandi</span></div>
+          <div><b class="${res.errors.length ? "amount-out" : ""}">${res.errors.length}</b><span>xato qator</span></div>
+        </div>
+        ${res.errors.length ? `<div class="import-errors"><table class="list">
+          <thead><tr><th>Qator</th><th>Xato</th></tr></thead>
+          <tbody>${res.errors.map((e) => `<tr><td>${e.row}</td><td>${esc(e.message)}</td></tr>`).join("")}</tbody>
+        </table></div><p class="muted small-note">Xato qatorlarni tuzatib, faylni qayta yuklang — qo'shilganlari takrorlanmaydi.</p>` : ""}`;
+      input.value = "";
+      if (res.created || res.updated) onDone();
+    });
+    input.addEventListener("change", () => upload(input.files[0]));
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files[0]); });
+  });
+}
+
+// ------------------------------------------------------------ balansni o'rnatish
+
+function setBalanceModal({ title, current, hint, url, body, allowNegative, withDue, onDone }) {
+  openModal(`
+    <form id="f">
+      <div class="modal-head"><h2>${title}</h2><button type="button" class="icon-btn" data-close>✕</button></div>
+      <p class="muted">${hint}</p>
+      <div class="balance-now"><span class="muted">Hozirgi balans</span><b>${money(current)}</b></div>
+      <label><span>Yangi balans (so'm)</span><input name="balance" type="number" ${allowNegative ? "" : 'min="0"'} step="1" required value="${current}"></label>
+      <div id="diff" class="muted"></div>
+      ${withDue ? `<label id="due-box" class="hidden"><span>Qarz to'lov muddati</span><input name="due_date" type="date" value="${dateAfter(30)}"></label>` : ""}
+      <label><span>Izoh <i>(ixtiyoriy)</i></span><input name="comment" maxlength="200" placeholder="Masalan: boshlang'ich qoldiq"></label>
+      <p class="muted small-note">Eski yozuvlar o'zgarmaydi — farq tuzatish sifatida tarixga yoziladi.</p>
+      <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">O'rnatish</button></div>
+    </form>`, (m) => {
+    const input = $("input[name=balance]", m);
+    const sync = () => {
+      const diff = (+input.value || 0) - current;
+      $("#diff", m).innerHTML = diff ? `Farq: <b class="${diff > 0 ? "amount-in" : "amount-out"}">${diff > 0 ? "+" : "−"}${money(Math.abs(diff))}</b>` : "";
+      const due = $("#due-box", m);
+      if (due) due.classList.toggle("hidden", diff <= 0);
+    };
+    input.addEventListener("input", sync);
+    input.select();
+    sync();
+    $("#f", m).addEventListener("submit", safe(async (e) => {
+      e.preventDefault();
+      await api("POST", url, Object.assign({}, body, formData(e.target)));
+      closeModal();
+      toast("Balans o'rnatildi ✅");
+      onDone();
+    }));
+  });
+}
+
+async function viewBalances() {
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const tab = params.get("tab") || "accounts";
+  const b = await api("GET", "/api/balances");
+  const tabs = [["accounts", "Kassa", "cashier"], ["customers", "Mijozlar", "users"], ["suppliers", "Ta'minotchilar", "box"]];
+  const targetName = (h) => h.target === "account" ? `Kassa · ${accountName(h.account)}`
+    : `${h.target === "customer" ? "Mijoz" : "Ta'minotchi"} · ${esc(h.target_name || "")}`;
+  const row = (name, sub, balance, attrs, cls = "") => `
+    <tr><td><b>${name}</b>${sub ? `<div class="muted small-note">${sub}</div>` : ""}</td>
+      <td class="right nowrap"><b class="${cls}">${money(balance)}</b></td>
+      <td class="right"><button class="btn small" ${attrs}>O'zgartirish</button></td></tr>`;
+  let body;
+  if (tab === "accounts") {
+    body = `<table class="list"><thead><tr><th>Hisob</th><th class="right">Balans</th><th></th></tr></thead><tbody>
+      ${b.accounts.accounts.map((a) => row(accountName(a.account), "", a.balance, `data-account="${a.account}"`, a.balance < 0 ? "amount-out" : "")).join("")}
+      <tr class="total-row"><td><b>Umumiy balans</b></td><td class="right"><b>${money(b.accounts.total)}</b></td><td></td></tr>
+    </tbody></table>`;
+  } else if (tab === "customers") {
+    body = `
+      <div class="picker-search" style="margin-bottom:10px">${icon("search")}<input id="filter" placeholder="Ism yoki telefon bo'yicha"></div>
+      <table class="list" id="bal-table"><thead><tr><th>Mijoz</th><th class="right">Qarzi (balans)</th><th></th></tr></thead><tbody>
+      ${b.customers.map((c) => row(esc(c.name), esc(formatPhone(c.phone)), c.balance, `data-customer="${c.id}"`, c.balance > 0 ? "amount-out" : ""))
+        .join("") || `<tr><td colspan="3" class="muted">Mijozlar yo'q — CRM › Mijozlar bo'limida qo'shing</td></tr>`}
+      </tbody></table>`;
+  } else {
+    body = `
+      <form class="inline-form" id="new-supplier">
+        <input name="name" placeholder="Ta'minotchi nomi" required>
+        <input name="phone" type="tel" placeholder="Telefon (ixtiyoriy)">
+        <button class="btn primary">+ Qo'shish</button>
+      </form>
+      <table class="list"><thead><tr><th>Ta'minotchi</th><th class="right">Balans (biz qarzdormiz)</th><th></th></tr></thead><tbody>
+      ${b.suppliers.map((x) => row(esc(x.name), esc(formatPhone(x.phone || "")), x.balance, `data-supplier="${x.id}"`, x.balance > 0 ? "amount-out" : ""))
+        .join("") || `<tr><td colspan="3" class="muted">Ta'minotchilar yo'q</td></tr>`}
+      </tbody></table>
+      <p class="muted small-note">"Ta'minotchiga pul berish" chiqimida ta'minotchi tanlansa, uning balansidan avtomatik ayiriladi.</p>`;
+  }
+  const view = layout(`
+    <div class="toolbar"><h2>Balansni o'rnatish</h2></div>
+    <div class="segmented">${tabs.map(([k, name, ic]) =>
+      `<button type="button" data-tab="${k}" class="${k === tab ? "active" : ""}">${icon(ic)} ${name}</button>`).join("")}</div>
+    <div class="two-col balances-layout">
+      <div class="panel">${body}</div>
+      <div class="panel">
+        <h3>O'zgarishlar tarixi</h3>
+        ${b.history.length ? `<table class="list"><tbody>${b.history.map((h) => {
+          const diff = h.new_balance - h.old_balance;
+          return `<tr><td>${targetName(h)}<div class="muted small-note">${esc(h.created_at.slice(0, 16))} · ${esc(h.user_name || "")}
+            ${h.comment ? " · " + esc(h.comment) : ""}</div></td>
+            <td class="right nowrap">${money(h.old_balance)} → <b>${money(h.new_balance)}</b>
+              <div class="${diff > 0 ? "amount-in" : "amount-out"} small-note">${diff > 0 ? "+" : "−"}${money(Math.abs(diff))}</div></td></tr>`;
+        }).join("")}</tbody></table>` : `<p class="muted">Hali o'zgartirilmagan</p>`}
+      </div>
+    </div>`);
+  const reload = () => router();
+  $$("[data-tab]", view).forEach((t) => t.addEventListener("click", () => go("#/finance/balances?tab=" + t.dataset.tab)));
+  $$("[data-account]", view).forEach((btn) => btn.addEventListener("click", () => {
+    const a = b.accounts.accounts.find((x) => x.account === btn.dataset.account);
+    setBalanceModal({ title: `Kassa balansi · ${accountName(a.account)}`, current: a.balance, allowNegative: true,
+      hint: "Kassadagi haqiqiy pulni kiriting — farq kirim yoki chiqim tuzatishi bo'lib yoziladi.",
+      url: "/api/balances/account", body: { account: a.account }, onDone: reload });
+  }));
+  $$("[data-customer]", view).forEach((btn) => btn.addEventListener("click", () => {
+    const c = b.customers.find((x) => x.id === +btn.dataset.customer);
+    setBalanceModal({ title: `Mijoz balansi · ${esc(c.name)}`, current: c.balance, withDue: true,
+      hint: "Mijozning bizdan qarzi. Ko'paytirilsa yangi qarz yoziladi, kamaytirilsa eski qarzlardan ayiriladi (kassaga pul tushmaydi).",
+      url: "/api/balances/customer", body: { customer_id: c.id }, onDone: reload });
+  }));
+  $$("[data-supplier]", view).forEach((btn) => btn.addEventListener("click", () => {
+    const x = b.suppliers.find((y) => y.id === +btn.dataset.supplier);
+    setBalanceModal({ title: `Ta'minotchi balansi · ${esc(x.name)}`, current: x.balance, allowNegative: true,
+      hint: "Biz ta'minotchiga qancha qarzdormiz. Manfiy son — ta'minotchi bizga qarzdor.",
+      url: "/api/balances/supplier", body: { supplier_id: x.id }, onDone: reload });
+  }));
+  const filter = $("#filter", view);
+  if (filter) filter.addEventListener("input", () => {
+    const q = filter.value.toLowerCase().replace(/\s/g, "");
+    $$("#bal-table tbody tr", view).forEach((tr) => {
+      tr.style.display = tr.textContent.toLowerCase().replace(/\s/g, "").includes(q) ? "" : "none";
+    });
+  });
+  const sup = $("#new-supplier", view);
+  if (sup) sup.addEventListener("submit", safe(async (e) => {
+    e.preventDefault();
+    await api("POST", "/api/suppliers", formData(e.target));
+    toast("Ta'minotchi qo'shildi");
+    reload();
+  }));
+}
+
 // ------------------------------------------------------------ moliya
 
 const ACCOUNTS = [["cash", "Naqd", "cash"], ["card", "Karta", "card"], ["payme", "Payme", "phone"], ["click", "Click", "phone"],
@@ -1294,8 +1485,8 @@ function signedMoney(direction, amount) {
 }
 
 function entryModal(direction, balance, onSaved) {
-  api("GET", "/api/finance/types").then((types) => {
-    const list = types.filter((t) => t.direction === direction);
+  Promise.all([api("GET", "/api/finance/types"), direction === "out" ? api("GET", "/api/suppliers") : []]).then(([types, suppliers]) => {
+    const list = types.filter((t) => t.direction === direction && !t.is_adjust);
     const balances = {};
     balance.accounts.forEach((a) => { balances[a.account] = a.balance; });
     openModal(`
@@ -1315,6 +1506,9 @@ function entryModal(direction, balance, onSaved) {
               <span>${icon(ic)}<b>${name}</b><small>${money(balances[k] || 0)}</small></span></label>`).join("")}
         </div>
         <label><span>Summa (so'm)</span><input name="amount" type="number" min="1" step="1" required inputmode="numeric"></label>
+        ${direction === "out" ? `<label><span>Ta'minotchi <i>(ixtiyoriy — tanlansa uning balansidan ayiriladi)</i></span>
+          <select name="supplier_id"><option value="">— Tanlanmagan —</option>
+            ${suppliers.map((x) => `<option value="${x.id}">${esc(x.name)} · ${money(x.balance)}</option>`).join("")}</select></label>` : ""}
         <label><span>Izoh <i>(ixtiyoriy)</i></span><input name="comment" maxlength="200" placeholder="Masalan: mijoz ismi yoki ta'minotchi"></label>
         <p class="muted small-note">Saqlangan tranzaksiyani o'zgartirib bo'lmaydi, faqat bekor qilish mumkin.</p>
         <div class="actions"><button type="button" class="btn" data-close>Bekor</button>
@@ -1579,7 +1773,9 @@ async function viewMenu() {
         </table>
       </div>
       <div class="panel">
-        <div class="toolbar"><h2>Taomlar</h2><button class="btn primary small" id="add-prod">+ Taom qo'shish</button></div>
+        <div class="toolbar"><h2>Taomlar</h2>
+          <button class="btn small" id="import-prod">${icon("upload")} Import</button>
+          <button class="btn primary small" id="add-prod">+ Taom qo'shish</button></div>
         <table class="list">
           <thead><tr><th></th><th>Nomi</th><th>Kategoriya</th><th>Printer</th>
             <th class="right">Tannarx</th><th class="right">Sotish narxi</th><th class="right">Foyda</th><th></th></tr></thead>
@@ -1695,6 +1891,7 @@ async function viewMenu() {
 
   $("#add-cat").addEventListener("click", () => catForm());
   $("#add-prod").addEventListener("click", () => prodForm());
+  $("#import-prod").addEventListener("click", () => importModal("products", "Mahsulotlarni import qilish", viewMenu));
   $$("[data-edit-cat]").forEach((b) => b.addEventListener("click", () =>
     catForm(state.categories.find((c) => c.id === +b.dataset.editCat))));
   $$("[data-edit-prod]").forEach((b) => b.addEventListener("click", () =>
@@ -2263,6 +2460,7 @@ const routes = [
   [/^#\/finance$/, viewFinanceCash, ["finance"]],
   [/^#\/finance\/entries$/, viewFinanceEntries, ["finance"]],
   [/^#\/finance\/types$/, viewFinanceTypes, ["finance"]],
+  [/^#\/finance\/balances$/, viewBalances, ["finance"]],
   [/^#\/tables$/, viewTables, ["tables"]],
   [/^#\/order\/(\d+)$/, viewOrder, ["tables", "cashier", "reports"]],
   [/^#\/kitchen$/, viewKitchen, ["kitchen"]],

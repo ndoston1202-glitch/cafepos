@@ -37,6 +37,9 @@ Linux/macOS: `python3 desktop.py` (yoki faqat server: `python3 server.py`)
 - 👥 **CRM** — Mijozlar (telefon, ism, jins; qarzlar va to'lovlar tarixi) va Mijozlar qarzi
   (Muddati o'tgan / To'lov vaqti keldi / Muddati bor). Buyurtmani "Qarzga" to'lash mumkin.
   Qarz to'lovi: Naqd → naqd kassa, Click → karta, Terminal va Pul ko'chirish → hisob raqam
+- 📥 **Import** — Mahsulotlar va Mijozlarni Excel shablon (.xlsx) yoki CSV orqali bir yo'la qo'shish
+- ⚖️ **Balansni o'rnatish** (Moliya) — kassa hisoblari, mijoz va ta'minotchi balansini o'zgartirish;
+  farq tuzatish sifatida tarixga yoziladi
 - 💵 **Moliya** — Kassa (Naqd/Karta/Payme/Click balansi), kirim-chiqim, tranzaksiyalar tarixi,
   tranzaksiya turlari (takrorlanmaydi, o'zgartirilmaydi; bajarilgani bekor qilinadi, o'chirilmaydi)
 - 🧾 **Xizmat haqi** — stolda o'tirganlarga foiz (⚙️ Sozlamalar); har bir zal uchun alohida foiz qo'yish mumkin
