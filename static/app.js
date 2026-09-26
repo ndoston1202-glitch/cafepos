@@ -16,8 +16,13 @@ const METHOD_NAMES = { cash: "Naqd", card: "Karta", payme: "Payme", click: "Clic
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
+// Eski Safari (iOS 12) uchun: "a ?? b" o'rniga
+function ifNull(value, fallback) {
+  return value === null || value === undefined ? fallback : value;
+}
+
 function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+  return String(ifNull(value, "")).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
 }
@@ -135,7 +140,9 @@ function resizeImage(file, maxSize) {
 }
 
 function formData(form) {
-  return Object.fromEntries(new FormData(form).entries());
+  const data = {};
+  new FormData(form).forEach((value, key) => { data[key] = value; });
+  return data;
 }
 
 // ------------------------------------------------------------ login
@@ -814,7 +821,7 @@ async function viewMenu() {
   const catForm = (c = {}) => openModal(`
     <form id="f"><h2>${c.id ? "Kategoriyani tahrirlash" : "Yangi kategoriya"}</h2>
       <label><span>Nomi</span><input name="name" value="${esc(c.name || "")}" required></label>
-      <label><span>Tartib raqami</span><input name="sort" type="number" value="${c.sort ?? state.categories.length}"></label>
+      <label><span>Tartib raqami</span><input name="sort" type="number" value="${ifNull(c.sort, state.categories.length)}"></label>
       <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
     </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
     e.preventDefault();
@@ -829,7 +836,7 @@ async function viewMenu() {
       <label><span>Mahsulot nomi</span><input name="name" value="${esc(p.name || "")}" placeholder="Masalan: Osh" required></label>
       <div class="grid-2">
         <label><span>Tannarxi (so'm)</span><input name="cost" type="number" min="0" value="${p.cost || ""}" placeholder="0"></label>
-        <label><span>Sotish narxi (so'm)</span><input name="price" type="number" min="0" value="${p.price ?? ""}" required></label>
+        <label><span>Sotish narxi (so'm)</span><input name="price" type="number" min="0" value="${ifNull(p.price, "")}" required></label>
       </div>
       <div class="muted" id="margin"></div>
       <div class="image-field">
@@ -964,8 +971,8 @@ async function viewTablesAdmin() {
       <label><span>Nomi</span><input name="name" value="${esc(h.name || "")}" placeholder="Banket zali" required></label>
       <label><span>Xizmat haqi, % <i>(bo'sh qoldirilsa umumiy: ${percent(state.settings.service_percent)})</i></span>
         <input name="service_percent" type="number" min="0" max="100" step="0.5"
-          value="${h.service_percent ?? ""}" placeholder="${state.settings.service_percent}"></label>
-      <label><span>Tartib raqami</span><input name="sort" type="number" value="${h.sort ?? halls.length}"></label>
+          value="${ifNull(h.service_percent, "")}" placeholder="${state.settings.service_percent}"></label>
+      <label><span>Tartib raqami</span><input name="sort" type="number" value="${ifNull(h.sort, halls.length)}"></label>
       <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
     </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
     e.preventDefault();
@@ -976,7 +983,7 @@ async function viewTablesAdmin() {
   })));
 
   const form = (t = {}) => {
-    const hallId = t.hall_id ?? (halls[0] || {}).id;
+    const hallId = ifNull(t.hall_id, (halls[0] || {}).id);
     const inHall = tables.filter((x) => x.hall_id === hallId).length;
     openModal(`
       <form id="f"><h2>${t.id ? "Stolni tahrirlash" : "Yangi stol"}</h2>
@@ -986,7 +993,7 @@ async function viewTablesAdmin() {
             ${halls.map((h) => `<option value="${h.id}" ${h.id === hallId ? "selected" : ""}>${esc(h.name)}</option>`).join("")}
           </select></label>
         <label><span>Nomi (masalan: Stol 5, Kabina 2)</span><input name="name" value="${esc(t.name || `Stol ${inHall + 1}`)}" required></label>
-        <label><span>O'rinlar soni</span><input name="seats" type="number" min="1" value="${t.seats ?? 4}"></label>
+        <label><span>O'rinlar soni</span><input name="seats" type="number" min="1" value="${ifNull(t.seats, 4)}"></label>
         <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
       </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
       e.preventDefault();
@@ -1516,3 +1523,5 @@ window.addEventListener("hashchange", router);
   }
   router();
 })();
+
+window.__cafeposLoaded = true;
