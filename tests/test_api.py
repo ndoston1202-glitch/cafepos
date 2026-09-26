@@ -1076,6 +1076,41 @@ class ApiTest(unittest.TestCase):
         status, _ = self.cashier.call("POST", f"/api/sales/{order['id']}/return", {"items": [{"item_id": item1["id"], "qty": 1}]})
         self.assertEqual(status, 409)
 
+    def test_pin_login(self):
+        import server
+        # administrator standart PIN bilan kiradi
+        status, me = Client(self.base).call("POST", "/api/login", {"pin": "1234"})
+        self.assertEqual((status, me["username"]), (200, "admin"))
+        # xodim faqat PIN bilan yaratiladi
+        status, u = self.admin.call("POST", "/api/users", {"username": "pinli", "first_name": "Pinli",
+                                                          "role": "waiter", "pin": "4321"})
+        self.assertEqual(status, 200)
+        status, me = Client(self.base).call("POST", "/api/login", {"pin": "4321"})
+        self.assertEqual((status, me["username"]), (200, "pinli"))
+        # bir xil PIN ikki xodimda bo'lmaydi, format tekshiriladi
+        status, _ = self.admin.call("PUT", f"/api/users/{u['id']}", {"first_name": "Pinli", "role": "waiter", "pin": "1234"})
+        self.assertEqual(status, 409)
+        status, _ = self.admin.call("PUT", f"/api/users/{u['id']}", {"first_name": "Pinli", "role": "waiter", "pin": "12a4"})
+        self.assertEqual(status, 400)
+        self.admin.call("PUT", f"/api/users/{u['id']}", {"first_name": "Pinli", "role": "waiter", "pin": "5555"})
+        self.assertEqual(Client(self.base).call("POST", "/api/login", {"pin": "4321"})[0], 401)
+        _, users = self.admin.call("GET", "/api/users")
+        self.assertTrue(next(x for x in users if x["id"] == u["id"])["has_pin"])
+        self.assertNotIn("pin_lookup", json.dumps(users))
+        _, settings = self.admin.call("GET", "/api/settings")
+        self.assertNotIn("_pin_secret", settings)
+        # 5 ta xatodan keyin kutish kerak
+        server.LOGIN_GUARD.ok("127.0.0.1")
+        for _ in range(4):
+            Client(self.base).call("POST", "/api/login", {"pin": "0000"})
+        status, err = Client(self.base).call("POST", "/api/login", {"pin": "0000"})
+        self.assertEqual(status, 401)
+        status, err = Client(self.base).call("POST", "/api/login", {"pin": "5555"})
+        self.assertEqual(status, 429)
+        server.LOGIN_GUARD.ok("127.0.0.1")
+        self.assertEqual(Client(self.base).call("POST", "/api/login", {"pin": "5555"})[0], 200)
+        server.LOGIN_GUARD.ok("127.0.0.1")
+
 
 
 class PrintingTest(unittest.TestCase):

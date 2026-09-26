@@ -7,6 +7,7 @@ Ishga tushirish:  python server.py   ->  http://localhost:8000
 import atexit
 import base64
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
@@ -285,6 +286,8 @@ MIGRATIONS = [
     ("users", "phone", "TEXT"),
     # JSON ro'yxat; NULL = rol bo'yicha standart ruxsatlar
     ("users", "permissions", "TEXT"),
+    # PIN kod bilan kirish: HMAC(sir, pin) - qidirish uchun, bir xil PIN ikki xodimda bo'lmaydi
+    ("users", "pin_lookup", "TEXT"),
     ("products", "printer_id", "INTEGER REFERENCES printers(id)"),
     ("products", "cost", "INTEGER NOT NULL DEFAULT 0"),  # tannarx
     ("products", "image", "TEXT"),
@@ -300,6 +303,11 @@ def connect():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def pin_hash(conn, pin):
+    secret = conn.execute("SELECT value FROM settings WHERE key = '_pin_secret'").fetchone()[0]
+    return hmac.new(secret.encode(), str(pin).encode(), hashlib.sha256).hexdigest()
 
 
 def hash_password(password, salt=None):
@@ -340,6 +348,13 @@ def init_db(conn):
                 )
         for i in range(1, 9):
             conn.execute("INSERT INTO tables (name, seats) VALUES (?, ?)", (f"Stol {i}", 4))
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_pin ON users(pin_lookup)")
+    if not conn.execute("SELECT 1 FROM settings WHERE key = '_pin_secret'").fetchone():
+        conn.execute("INSERT INTO settings (key, value) VALUES ('_pin_secret', ?)", (secrets.token_hex(32),))
+    if not conn.execute("SELECT 1 FROM users WHERE pin_lookup IS NOT NULL").fetchone():
+        # PIN hali hech kimda yo'q - administratorga standart PIN 1234 (keyin Xodimlar bo'limida o'zgartiriladi)
+        conn.execute("UPDATE users SET pin_lookup = ? WHERE id = (SELECT MIN(id) FROM users WHERE role = 'admin')",
+                     (pin_hash(conn, DEFAULT_PIN),))
     # Bazaviy tranzaksiya turlari doim bo'ladi
     for name, direction in SYSTEM_FINANCE_TYPES + tuple((n, d) for d, n in ADJUST_TYPES.items()):
         conn.execute(
@@ -409,11 +424,14 @@ def to_int(value, field, minimum=None):
 
 
 DEFAULT_SETTINGS = {"cafe_name": "CafePOS", "service_percent": "0"}
+DEFAULT_PIN = "1234"
+PIN_LENGTH = 4
 
 
 def get_settings(conn):
     settings = dict(DEFAULT_SETTINGS)
-    settings.update({r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")})
+    # "_" bilan boshlanadigan kalitlar - ichki sirlar, tashqariga berilmaydi
+    settings.update({r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings WHERE key NOT LIKE '\\_%' ESCAPE '\\'")})
     settings["service_percent"] = float(settings["service_percent"] or 0)
     return settings
 
@@ -2151,7 +2169,8 @@ def public_user(row):
 def list_users(conn, user, params, data, query):
     users = rows(
         conn.execute(
-            """SELECT id, username, full_name, first_name, last_name, phone, role, permissions, active
+            """SELECT id, username, full_name, first_name, last_name, phone, role, permissions, active,
+                      pin_lookup IS NOT NULL AS has_pin
                FROM users ORDER BY active DESC, id"""
         )
     )
@@ -2192,19 +2211,35 @@ def check_password(password):
         raise ApiError(400, "Parol kamida 4 belgi bo'lishi kerak")
 
 
+def set_pin(conn, user_id, pin):
+    pin = str(pin or "").strip()
+    if not re.fullmatch(rf"\d{{{PIN_LENGTH}}}", pin):
+        raise ApiError(400, f"PIN kod {PIN_LENGTH} ta raqam bo'lishi kerak")
+    lookup = pin_hash(conn, pin)
+    if conn.execute("SELECT 1 FROM users WHERE pin_lookup = ? AND id != ?", (lookup, user_id)).fetchone():
+        raise ApiError(409, "Bu PIN kod boshqa xodimda bor - boshqasini tanlang")
+    conn.execute("UPDATE users SET pin_lookup = ? WHERE id = ?", (lookup, user_id))
+
+
 @route("POST", "/api/users", ("users",))
 def create_user(conn, user, params, data, query):
-    require(data, "username", "password")
-    check_password(data["password"])
+    require(data, "username")
+    if not data.get("password") and not data.get("pin"):
+        raise ApiError(400, "PIN kod kiriting")
+    if data.get("password"):
+        check_password(data["password"])
     username = data["username"].strip()
     if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
         raise ApiError(409, "Bu username band")
-    pw, salt = hash_password(data["password"])
+    # parol berilmasa - tasodifiy (xodim PIN bilan kiradi)
+    pw, salt = hash_password(data.get("password") or secrets.token_urlsafe(16))
     cur = conn.execute(
         """INSERT INTO users (first_name, last_name, full_name, phone, role, permissions,
                               username, password_hash, salt) VALUES (?,?,?,?,?,?,?,?,?)""",
         (*user_values(conn, user, data), username, pw, salt),
     )
+    if data.get("pin"):
+        set_pin(conn, cur.lastrowid, data["pin"])
     return {"id": cur.lastrowid}
 
 
@@ -2235,6 +2270,8 @@ def update_user(conn, user, params, data, query):
         check_password(data["password"])
         pw, salt = hash_password(data["password"])
         conn.execute("UPDATE users SET password_hash = ?, salt = ? WHERE id = ?", (pw, salt, target_id))
+    if data.get("pin"):
+        set_pin(conn, target_id, data["pin"])
     if not active or data.get("password"):
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (target_id,))
     return {"ok": True}
@@ -2293,7 +2330,7 @@ TELEGRAM_DEFAULT_CATEGORIES = ("sales", "finance", "crm", "menu", "users", "sett
 ACCOUNT_NAMES = {"cash": "Naqd", "card": "Karta", "payme": "Payme", "click": "Click", "bank": "Hisob raqam",
                  "debt": "Qarzga", "adjust": "Tuzatish"}
 DEBT_METHOD_NAMES = {"cash": "Naqd", "click": "Click", "terminal": "Terminal", "transfer": "Pul ko'chirish"}
-SECRET_FIELDS = {"password", "password_hash", "salt", "token", "image", "data", "logo"}
+SECRET_FIELDS = {"password", "password_hash", "salt", "token", "image", "data", "logo", "pin", "pin_lookup"}
 
 
 def fmt_money(n):
@@ -2567,6 +2604,8 @@ def _a_user(ctx, title):
         fields.append(["Ruxsatlar", ", ".join(PERMISSION_NAMES.get(p, p) for p in d["permissions"]) or "yo'q"])
     if ctx.before and d.get("password"):
         fields.append(["Parol", "o'zgartirildi"])
+    if ctx.before and d.get("pin"):
+        fields.append(["PIN kod", "o'zgartirildi"])
     if ctx.before and d.get("active") is False:
         fields.append(["Holati", "bloklandi"])
     return entry(title, f"{name} ({fields[1][1]})", fields, entity=f"user:{ctx.params[0] if ctx.params else ctx.result.get('id')}")
@@ -3317,6 +3356,38 @@ def journal_detail(conn, user, params, data, query):
 
 
 
+class LoginGuard:
+    """PIN atigi 4 raqam - taxmin qilib topishning oldini olish: 5 ta xatodan keyin kutish."""
+
+    LIMIT, BLOCK = 5, 60
+
+    def __init__(self):
+        self.fails = {}
+        self.lock = threading.Lock()
+
+    def blocked(self, ip):
+        with self.lock:
+            count, until = self.fails.get(ip, (0, 0))
+            left = int(until - datetime.now().timestamp())
+            return left if left > 0 else 0
+
+    def fail(self, ip):
+        with self.lock:
+            count, until = self.fails.get(ip, (0, 0))
+            count += 1
+            if count >= self.LIMIT:
+                self.fails[ip] = (0, datetime.now().timestamp() + self.BLOCK)
+            else:
+                self.fails[ip] = (count, until)
+
+    def ok(self, ip):
+        with self.lock:
+            self.fails.pop(ip, None)
+
+
+LOGIN_GUARD = LoginGuard()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CafePOS/1.0"
 
@@ -3481,14 +3552,27 @@ class Handler(BaseHTTPRequestHandler):
         raise ApiError(405 if path_matched else 404, "Topilmadi")
 
     def login(self, conn, data):
-        require(data, "username", "password")
-        row = conn.execute(
-            "SELECT * FROM users WHERE username = ? AND active = 1", (data["username"].strip(),)
-        ).fetchone()
-        if not row or not secrets.compare_digest(
-            hash_password(data["password"], row["salt"])[0], row["password_hash"]
-        ):
-            raise ApiError(401, "Login yoki parol noto'g'ri")
+        ip = self.client_address[0]
+        wait = LOGIN_GUARD.blocked(ip)
+        if wait:
+            raise ApiError(429, f"Ko'p noto'g'ri urinish. {wait} soniyadan keyin qayta urining")
+        if data.get("pin") not in (None, ""):  # PIN kod bilan kirish (ekrandagi raqamlar)
+            row = conn.execute("SELECT * FROM users WHERE pin_lookup = ? AND active = 1",
+                               (pin_hash(conn, str(data["pin"]).strip()),)).fetchone()
+            if not row:
+                LOGIN_GUARD.fail(ip)
+                raise ApiError(401, "PIN kod noto'g'ri")
+        else:
+            require(data, "username", "password")
+            row = conn.execute(
+                "SELECT * FROM users WHERE username = ? AND active = 1", (data["username"].strip(),)
+            ).fetchone()
+            if not row or not secrets.compare_digest(
+                hash_password(data["password"], row["salt"])[0], row["password_hash"]
+            ):
+                LOGIN_GUARD.fail(ip)
+                raise ApiError(401, "Login yoki parol noto'g'ri")
+        LOGIN_GUARD.ok(ip)
         token = secrets.token_urlsafe(32)
         expires = (datetime.now() + timedelta(days=SESSION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
         conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now(),))
@@ -3541,7 +3625,7 @@ def main():
         print(f"  Telefon/planshetdan (shu Wi-Fi): {lans[0]}")
     for lan in lans[1:]:
         print(f"    boshqa adapter (odatda kerak emas): {lan}")
-    print("  Login: admin   Parol: admin123")
+    print(f"  Kirish: PIN {DEFAULT_PIN} (administrator)   yoki login: admin / parol: admin123")
     print("  To'xtatish: TOXTATISH.bat (yoki shu oynada Ctrl+C)")
     print("=" * 50)
     if "--no-browser" not in sys.argv:

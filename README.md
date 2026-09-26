@@ -19,6 +19,13 @@ Server qora oynasiz orqa fonda ishlaydi.
 Oynani yopish serverni to'xtatmaydi — telefon va planshetlar ishlashda davom etadi.
 Xatolar `cafepos.log` fayliga yoziladi.
 
+### Kirish
+
+Kirish ekranida **PIN kod** (4 raqam) ekrandagi raqamlar bilan teriladi — klaviatura shart emas.
+Administratorning standart PIN kodi: **1234** (Sotuvchilar bo'limida o'zgartiring). Har bir xodimga
+PIN kod Sotuvchilar → xodimni tahrirlash orqali beriladi. "Login va parol bilan kirish" ham qolgan.
+5 marta noto'g'ri terilsa, 1 daqiqa kutish kerak bo'ladi.
+
 ### Birinchi marta
 1. **Python 3.8+** o'rnating: https://www.python.org/downloads/ ("Add Python to PATH" ni belgilang)
 2. **ORNATISH.bat** ga ikki marta bosing

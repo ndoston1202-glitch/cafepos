@@ -225,7 +225,9 @@ function showInstallHelp() {
   });
 }
 
-function renderLogin() {
+const PIN_LENGTH = 4;
+
+function renderLogin(withPassword) {
   $("#app").innerHTML = `
     <div class="auth">
       <div class="auth-glow"></div>
@@ -234,48 +236,87 @@ function renderLogin() {
         <h1>Kafengiz nazorat ostida<br><span>doim va hamma joyda</span></h1>
         <p>Stollar, buyurtmalar, oshxona va kassani yagona tizimda boshqaring</p>
       </section>
+      ${withPassword ? `
       <form class="auth-card" id="login-form">
-        <div class="auth-card-brand">
-          <img src="/img/logo-icon.png" alt="">
-          <span>Cafe<b>Pos</b></span>
-        </div>
+        <div class="auth-card-brand"><img src="/img/logo-icon.png" alt=""><span>Cafe<b>Pos</b></span></div>
         <h2>Kirish</h2>
         <label><span>Foydalanuvchi nomi <em>*</em></span>
           <input name="username" autocomplete="username" autocapitalize="off" required></label>
         <label><span>Parol <em>*</em></span>
-          <div class="password-field">
-            <input name="password" type="password" autocomplete="current-password" required>
-            <button type="button" class="eye" id="toggle-password" aria-label="Parolni ko'rsatish">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-            </button>
-          </div>
-        </label>
+          <input name="password" type="password" autocomplete="current-password" required></label>
         <div class="error" id="login-error"></div>
         <button class="auth-submit">Kirish</button>
-        <div class="auth-divider"><span>CafePos · ERP dasturi</span></div>
-        <p class="auth-note">Login va parolni administratoringizdan oling</p>
+        <button type="button" class="auth-switch" id="to-pin">← PIN kod bilan kirish</button>
+      </form>` : `
+      <div class="auth-card pin-card" id="pin-card">
+        <div class="auth-card-brand"><img src="/img/logo-icon.png" alt=""><span>Cafe<b>Pos</b></span></div>
+        <h2>PIN kodni kiriting</h2>
+        <div class="pin-dots" id="pin-dots">${"<i></i>".repeat(PIN_LENGTH)}</div>
+        <div class="error" id="login-error"></div>
+        <div class="pin-pad">
+          ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<button type="button" data-digit="${n}">${n}</button>`).join("")}
+          <button type="button" class="pin-fn" data-clear title="Tozalash">C</button>
+          <button type="button" data-digit="0">0</button>
+          <button type="button" class="pin-fn" data-back title="O'chirish">⌫</button>
+        </div>
+        <button type="button" class="auth-switch" id="to-password">Login va parol bilan kirish</button>
         ${installButton("auth-install")}
-      </form>
+      </div>`}
     </div>`;
   bindInstallButtons($("#app"));
-  $("#toggle-password").addEventListener("click", () => {
-    const input = $("input[name=password]");
-    input.type = input.type === "password" ? "text" : "password";
-    $("#toggle-password").classList.toggle("on", input.type === "text");
-  });
-  $("#login-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
+  const enter = async (body) => {
+    state.user = await api("POST", "/api/login", body);
+    await loadSettings();
+    if (!location.hash || location.hash === "#/") location.hash = defaultRoute();
+    document.removeEventListener("keydown", state.pinKeys);
+    router();
+  };
+  if (withPassword) {
+    $("#to-pin").addEventListener("click", () => renderLogin(false));
+    $("#login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try { await enter(formData(e.target)); } catch (err) { $("#login-error").textContent = err.message; }
+    });
+    $("input[name=username]").focus();
+    return;
+  }
+  let pin = "";
+  let busy = false;
+  const dots = $("#pin-dots");
+  const draw = () => $$("i", dots).forEach((d, i) => d.classList.toggle("on", i < pin.length));
+  const press = async (key) => {
+    if (busy) return;
+    $("#login-error").textContent = "";
+    if (key === "back") pin = pin.slice(0, -1);
+    else if (key === "clear") pin = "";
+    else if (pin.length < PIN_LENGTH) pin += key;
+    draw();
+    if (pin.length < PIN_LENGTH) return;
+    busy = true;
     try {
-      state.user = await api("POST", "/api/login", formData(e.target));
-      await loadSettings();
-      if (!location.hash || location.hash === "#/") location.hash = defaultRoute();
-      router();
+      await enter({ pin });
     } catch (err) {
       $("#login-error").textContent = err.message;
+      dots.classList.add("shake");
+      if (navigator.vibrate) navigator.vibrate(150);
+      setTimeout(() => { dots.classList.remove("shake"); pin = ""; draw(); busy = false; }, 450);
     }
+  };
+  $$("[data-digit]").forEach((b) => b.addEventListener("click", () => press(b.dataset.digit)));
+  $("[data-back]").addEventListener("click", () => press("back"));
+  $("[data-clear]").addEventListener("click", () => press("clear"));
+  $("#to-password").addEventListener("click", () => {
+    document.removeEventListener("keydown", state.pinKeys);
+    renderLogin(true);
   });
-  $("input[name=username]").focus();
+  // Klaviatura bo'lsa - raqamlarni undan ham yozish mumkin
+  document.removeEventListener("keydown", state.pinKeys);
+  state.pinKeys = (e) => {
+    if (/^[0-9]$/.test(e.key)) press(e.key);
+    else if (e.key === "Backspace") press("back");
+    else if (e.key === "Escape") press("clear");
+  };
+  document.addEventListener("keydown", state.pinKeys);
 }
 
 async function logout() {
@@ -2237,8 +2278,11 @@ function userForm(u = null) {
         <label><span>Familiyasi</span><input name="last_name" value="${esc(u.last_name || "")}"></label>
         <label><span>Username *</span><input name="username" value="${esc(u.username || "")}" ${isNew ? "required" : "disabled"}
           autocomplete="off" autocapitalize="off"></label>
-        <label><span>${isNew ? "Parol *" : "Yangi parol"}</span><input name="password" type="password" minlength="4"
-          ${isNew ? "required" : `placeholder="O'zgartirmaslik uchun bo'sh"`} autocomplete="new-password"></label>
+        <label><span>${isNew ? "PIN kod * (4 raqam — shu bilan kiradi)" : "Yangi PIN kod"}${!isNew && u.has_pin ? "" : !isNew ? ` <em class="amount-out">o'rnatilmagan</em>` : ""}</span>
+          <input name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" ${isNew ? "required" : ""}
+          placeholder="${isNew ? "Masalan: 2580" : "O'zgartirmaslik uchun bo'sh"}"></label>
+        <label><span>${isNew ? "Parol (ixtiyoriy)" : "Yangi parol"}</span><input name="password" type="password" minlength="4"
+          placeholder="${isNew ? "Login/parol bilan kirish uchun" : "O'zgartirmaslik uchun bo'sh"}" autocomplete="new-password"></label>
       </div>
       <div class="grid-2">
         <div>
@@ -2294,6 +2338,7 @@ function userForm(u = null) {
       };
       if (!data.permissions.length) throw new Error("Kamida bitta bo'limga ruxsat bering");
       if (f.password.value) data.password = f.password.value;
+      if (f.pin.value) data.pin = f.pin.value;
       if (isNew) data.username = f.username.value;
       else data.active = f.active.checked;
       await api(isNew ? "POST" : "PUT", "/api/users" + (isNew ? "" : "/" + u.id), data);
