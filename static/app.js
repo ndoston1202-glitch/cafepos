@@ -300,6 +300,17 @@ const ICONS = {
   settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/>',
   burger: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z"/>',
+  sales: '<path d="M5 2v20l2.5-1.5L10 22l2-1.5 2 1.5 2.5-1.5L19 22V2l-2.5 1.5L14 2l-2 1.5L10 2 7.5 3.5Z"/><path d="M9 8h6M9 12h6M9 16h4"/>',
+  box: '<path d="M21 8 12 3 3 8v8l9 5 9-5Z"/><path d="m3 8 9 5 9-5M12 13v8"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>',
+  chevron: '<path d="m9 6 6 6-6 6"/>',
+  card: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>',
+  cash: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 12h.01M18 12h.01"/>',
+  phone: '<rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/>',
+  cancel: '<circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
   collapse: '<path d="m11 17-5-5 5-5M18 17l-5-5 5-5"/>',
   expand: '<path d="m6 17 5-5-5-5M13 17l5-5-5-5"/>',
 };
@@ -309,38 +320,82 @@ function icon(name) {
     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 }
 
-// Bo'limlar: [ruxsat, havola, ikonka, nomi]
-const SECTIONS = [
-  ["Ish", [
-    ["tables", "#/tables", "tables", "Stollar"],
-    ["cashier", "#/cashier", "cashier", "Kassa"],
-    ["kitchen", "#/kitchen", "kitchen", "Oshxona"],
-    ["reports", "#/reports", "reports", "Hisobot"],
-  ]],
-  ["Boshqaruv", [
-    ["menu", "#/menu", "menu", "Menyu"],
-    ["halls", "#/tables-admin", "halls", "Zallar"],
-    ["printers", "#/printers", "printer", "Printerlar"],
-    ["users", "#/users", "users", "Xodimlar"],
-    ["settings", "#/settings", "settings", "Sozlamalar"],
-  ]],
+// Chap menyu: bo'lim {perm, href, icon, name} yoki guruh {icon, name, children}
+const NAV = [
+  { perm: "reports", href: "#/dashboard", icon: "home", name: "Bosh sahifa" },
+  { id: "sales", icon: "sales", name: "Savdo", children: [
+    { perm: "tables", href: "#/tables", icon: "tables", name: "Stollar" },
+    { perm: "cashier", href: "#/cashier", icon: "cashier", name: "Kassa" },
+    { perm: "kitchen", href: "#/kitchen", icon: "kitchen", name: "Oshxona" },
+  ] },
+  { perm: "users", href: "#/users", icon: "users", name: "Sotuvchilar" },
+  { perm: "menu", href: "#/menu", icon: "box", name: "Mahsulotlar" },
+  { perm: "reports", href: "#/reports", icon: "reports", name: "Hisobotlar" },
+];
+// Sozlamalar alohida: yuqori o'ngdagi tugma, ichida yorliqlar
+const SETTINGS_TABS = [
+  { perm: "settings", href: "#/settings", icon: "settings", name: "Umumiy" },
+  { perm: "halls", href: "#/tables-admin", icon: "halls", name: "Zallar va stollar" },
+  { perm: "printers", href: "#/printers", icon: "printer", name: "Printerlar" },
 ];
 
-function navGroups() {
-  return SECTIONS
-    .map(([title, items]) => [title, items.filter(([perm]) => can(perm)).map(([, ...rest]) => rest)])
-    .filter(([, items]) => items.length);
+function visibleNav() {
+  return NAV.map((item) => item.children
+    ? Object.assign({}, item, { children: item.children.filter((c) => can(c.perm)) })
+    : item)
+    .filter((item) => item.children ? item.children.length : can(item.perm));
+}
+
+function visibleSettingsTabs() {
+  return SETTINGS_TABS.filter((t) => can(t.perm));
 }
 
 function defaultRoute() {
-  const first = navGroups()[0];
-  return first ? first[1][0][0] : "#/none";
+  for (const item of visibleNav()) return item.children ? item.children[0].href : item.href;
+  const tabs = visibleSettingsTabs();
+  return tabs.length ? tabs[0].href : "#/none";
+}
+
+// Yuqori paneldagi sarlavha: "Savdo › Stollar"
+function pageTrail(hash) {
+  if (hash.startsWith("#/order/")) return ["Savdo", "Buyurtma"];
+  for (const item of NAV) {
+    if (item.href === hash) return [item.name];
+    for (const c of item.children || []) if (c.href === hash) return [item.name, c.name];
+  }
+  const tab = SETTINGS_TABS.find((t) => t.href === hash);
+  return tab ? ["Sozlamalar", tab.name] : ["CafePOS"];
+}
+
+function openGroups() {
+  try { return JSON.parse(localStorage.getItem("nav-groups") || "{}"); } catch { return {}; }
 }
 
 function layout(content) {
   const hash = location.hash.split("?")[0];
   const isActive = (href) => hash === href || (href === "#/tables" && hash.startsWith("#/order/"));
   const initials = state.user.full_name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+  const saved = openGroups();
+  const link = (item, sub) => `
+    <a href="${item.href}" class="${isActive(item.href) ? "active" : ""} ${sub ? "sub" : ""}" title="${item.name}">
+      ${icon(item.icon)}<span>${item.name}</span>
+    </a>`;
+  const nav = visibleNav().map((item) => {
+    if (!item.children) return link(item);
+    const hasActive = item.children.some((c) => isActive(c.href));
+    const open = hasActive || saved[item.id] !== false;
+    return `
+      <div class="nav-group-box ${open ? "open" : ""} ${hasActive ? "has-active" : ""}" data-group="${item.id}">
+        <button type="button" class="nav-parent" title="${item.name}" data-first="${item.children[0].href}">
+          ${icon(item.icon)}<span>${item.name}</span><i class="chev">${icon("chevron")}</i>
+        </button>
+        <div class="nav-children">${item.children.map((c) => link(c, true)).join("")}</div>
+      </div>`;
+  }).join("");
+  const tabs = visibleSettingsTabs();
+  const inSettings = tabs.some((t) => t.href === hash);
+  const trail = pageTrail(hash);
+
   $("#app").innerHTML = `
     <div class="shell">
       <aside class="sidebar">
@@ -351,36 +406,47 @@ function layout(content) {
         </div>
         ${state.settings.cafe_name && state.settings.cafe_name !== "CafePOS"
           ? `<div class="cafe-name">${esc(state.settings.cafe_name)}</div>` : ""}
-        <nav class="side-nav">
-          ${navGroups().map(([title, items]) => `
-            <div class="nav-group">${esc(title)}</div>
-            ${items.map(([href, ic, name]) => `
-              <a href="${href}" class="${isActive(href) ? "active" : ""}" title="${name}">
-                ${icon(ic)}<span>${name}</span>
-              </a>`).join("")}`).join("")}
-        </nav>
+        <nav class="side-nav">${nav}</nav>
         ${installButton("side-install")}
-        <div class="side-user">
-          <div class="avatar">${esc(initials)}</div>
-          <div class="who">
-            <b>${esc(state.user.full_name)}</b>
-            <small>${ROLE_NAMES[state.user.role]}</small>
-          </div>
-          <button class="logout" id="logout-btn" title="Chiqish">${icon("logout")}</button>
-        </div>
       </aside>
       <div class="side-backdrop" id="side-backdrop"></div>
       <div class="content">
-        <header class="mobile-bar">
+        <header class="topbar">
           <button class="burger" id="burger" aria-label="Menyu">${icon("burger")}</button>
-          <img class="mobile-logo" src="/img/logo-icon.png" alt="">
-          <span class="brand-name">${esc(state.settings.cafe_name)}</span>
+          <div class="crumbs">${trail.map((t, i) => i < trail.length - 1
+            ? `<span class="muted">${esc(t)}</span><i class="chev">${icon("chevron")}</i>` : `<b>${esc(t)}</b>`).join("")}</div>
+          <div class="top-actions">
+            ${tabs.length ? `<a href="${tabs[0].href}" class="top-btn ${inSettings ? "active" : ""}" title="Sozlamalar">
+              ${icon("gear")}<span>Sozlamalar</span></a>` : ""}
+            <div class="top-user">
+              <div class="avatar">${esc(initials)}</div>
+              <div class="who"><b>${esc(state.user.full_name)}</b><small>${ROLE_NAMES[state.user.role]}</small></div>
+              <button class="logout" id="logout-btn" title="Chiqish">${icon("logout")}</button>
+            </div>
+          </div>
         </header>
-        <main id="view">${content}</main>
+        <main id="view">
+          ${inSettings ? `<nav class="settings-tabs">${tabs.map((t) => `
+            <a href="${t.href}" class="${t.href === hash ? "active" : ""}">${icon(t.icon)}<span>${t.name}</span></a>`).join("")}</nav>` : ""}
+          ${content}
+        </main>
       </div>
     </div>`;
+
   $("#logout-btn").addEventListener("click", logout);
   bindInstallButtons($("#app"));
+  $$(".nav-parent").forEach((b) => b.addEventListener("click", () => {
+    // Yig'ilgan panelda guruh bosilsa - birinchi bo'limiga o'tamiz
+    if (document.body.classList.contains("side-collapsed") && window.innerWidth > 760) {
+      location.hash = b.dataset.first;
+      return;
+    }
+    const box = b.parentElement;
+    box.classList.toggle("open");
+    const groups = openGroups();
+    groups[box.dataset.group] = box.classList.contains("open");
+    try { localStorage.setItem("nav-groups", JSON.stringify(groups)); } catch { /* ruxsat yo'q */ }
+  }));
   const toggle = $("#side-toggle");
   const syncToggle = () => {
     const collapsed = document.body.classList.contains("side-collapsed");
@@ -708,6 +774,156 @@ async function viewCashier() {
     </div>`);
   $$("tr[data-id]", view).forEach((tr) =>
     tr.addEventListener("click", () => (location.hash = "#/order/" + tr.dataset.id)));
+}
+
+// ------------------------------------------------------------ bosh sahifa
+
+const PERIODS = [["today", "Bugun"], ["week", "Joriy hafta"], ["month", "Joriy oy"], ["year", "Joriy yil"]];
+const METHOD_ICONS = { cash: "cash", card: "card", payme: "phone", click: "phone" };
+
+// Grafik o'qi uchun "chiroyli" yuqori chegara: 1, 2, 2.5, 5 × 10^n
+function niceMax(value) {
+  if (value <= 0) return 1;
+  const pow = Math.pow(10, Math.floor(Math.log10(value)));
+  const step = [1, 2, 2.5, 5, 10].find((m) => m * pow >= value);
+  return step * pow;
+}
+
+function compact(n) {
+  if (n >= 1e9) return (n / 1e9).toLocaleString("ru-RU", { maximumFractionDigits: 1 }) + " mlrd";
+  if (n >= 1e6) return (n / 1e6).toLocaleString("ru-RU", { maximumFractionDigits: 1 }) + " mln";
+  if (n >= 1e3) return Math.round(n / 1e3) + " ming";
+  return String(n);
+}
+
+// Bitta qatorli ustunli grafik (SVG): ingichka ustunlar, 4px yumaloq uchi, hover'da qiymat
+function columnChart(series, width) {
+  // SVG konteyner kengligida chiziladi - yozuvlar kattalashib/kichrayib ketmasin
+  const W = Math.max(280, Math.round(width || 640)), H = W < 500 ? 180 : 240;
+  const padL = 70, padB = 26, padT = 12;
+  const max = niceMax(Math.max(0, ...series.map((d) => d.value)));
+  const plotW = W - padL, plotH = H - padB - padT;
+  const slot = plotW / series.length;
+  const barW = Math.min(24, slot * 0.62);
+  const every = Math.ceil(series.length / Math.max(4, Math.floor(plotW / 44)));  // yorliqlar ustma-ust tushmasin
+  const y = (v) => padT + plotH - (v / max) * plotH;
+  const ticks = [0, max / 2, max];
+  const grid = ticks.map((t) => `
+    <line x1="${padL}" x2="${W}" y1="${y(t)}" y2="${y(t)}" class="grid"/>
+    <text x="${padL - 8}" y="${y(t) + 4}" class="tick" text-anchor="end">${compact(t)}</text>`).join("");
+  const bars = series.map((d, i) => {
+    const x = padL + i * slot + (slot - barW) / 2;
+    const h = (d.value / max) * plotH;
+    const top = y(d.value), r = Math.min(4, h, barW / 2);
+    const path = h > 0 ? `M${x},${padT + plotH} V${top + r} Q${x},${top} ${x + r},${top} H${x + barW - r}
+      Q${x + barW},${top} ${x + barW},${top + r} V${padT + plotH} Z` : "";
+    return `
+      <g class="col" data-i="${i}">
+        <rect class="hit" x="${padL + i * slot}" y="${padT}" width="${slot}" height="${plotH}"/>
+        ${path ? `<path d="${path}" class="bar"/>` : ""}
+        ${i % every === 0 ? `<text x="${x + barW / 2}" y="${H - 8}" class="tick" text-anchor="middle">${esc(d.label)}</text>` : ""}
+      </g>`;
+  }).join("");
+  return `
+    <div class="chart-wrap">
+      <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="chart" role="img" aria-label="Tushum grafigi">${grid}${bars}</svg>
+      <div class="chart-tip hidden"></div>
+      ${series.every((d) => !d.value) ? `<div class="chart-empty">Bu davrda savdo yo'q</div>` : ""}
+    </div>`;
+}
+
+function bindChart(root, series, formatLabel) {
+  const wrap = $(".chart-wrap", root);
+  const tip = $(".chart-tip", wrap);
+  $$(".col", wrap).forEach((g) => {
+    const show = () => {
+      const d = series[+g.dataset.i];
+      $$(".col.hover", wrap).forEach((x) => x.classList.remove("hover"));
+      g.classList.add("hover");
+      tip.innerHTML = `<b>${money(d.value)}</b><span>${esc(formatLabel(d.label))}</span>`;
+      tip.classList.remove("hidden");
+      const box = g.querySelector(".hit").getBoundingClientRect();
+      const wb = wrap.getBoundingClientRect();
+      const left = Math.min(Math.max(box.left - wb.left + box.width / 2, 70), wb.width - 70);
+      tip.style.left = left + "px";
+    };
+    g.addEventListener("mouseenter", show);
+    g.addEventListener("click", show);
+  });
+  wrap.addEventListener("mouseleave", () => {
+    tip.classList.add("hidden");
+    $$(".col.hover", wrap).forEach((x) => x.classList.remove("hover"));
+  });
+}
+
+async function viewDashboard() {
+  let period = "month";
+  try { period = localStorage.getItem("dash-period") || "month"; } catch { /* ruxsat yo'q */ }
+  const view = layout(`<div id="dash"><p class="muted">Yuklanmoqda...</p></div>`);
+
+  async function render() {
+    const d = await api("GET", "/api/dashboard?period=" + period);
+    // grafik paneli to'liq kenglikda: panel ichki chekinishlarini ayiramiz
+    const chartWidth = $("#dash", view).clientWidth - 34;
+    const s = d.summary;
+    const periodName = PERIODS.find((p) => p[0] === period)[1];
+    const methodTotal = d.by_method.reduce((a, m) => a + m.revenue, 0);
+    const labelFor = (label) => period === "today" ? `${label}:00 — ${label}:59`
+      : period === "month" ? `${label}-kun` : label;
+    const tile = (ic, label, value, sub) => `
+      <div class="kpi">
+        <div class="kpi-head"><span class="kpi-icon">${icon(ic)}</span>${label}</div>
+        <div class="kpi-value">${value}</div>
+        <div class="kpi-sub">${sub}</div>
+      </div>`;
+    $("#dash", view).innerHTML = `
+      <div class="kpi-row">
+        ${tile("cash", "Kunlik savdo", money(d.today.revenue), `${d.today.orders} ta chek`)}
+        ${tile("reports", "Oylik savdo", money(d.month.revenue), `${d.month.orders} ta chek`)}
+        ${tile("check", "Bugungi cheklar soni", d.today.orders, "to'langan buyurtmalar")}
+        ${tile("sales", "O'rtacha chek", money(s.average), periodName.toLowerCase())}
+      </div>
+      <div class="segmented">${PERIODS.map(([k, name]) =>
+        `<button type="button" data-period="${k}" class="${k === period ? "active" : ""}">${name}</button>`).join("")}</div>
+      <div class="dash-grid">
+        <section class="panel dash-chart">
+          <div class="panel-head"><div><span class="muted">Tushum · ${periodName.toLowerCase()}</span>
+            <div class="panel-total">${money(s.revenue)}</div></div></div>
+          ${columnChart(d.series, chartWidth)}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><div><span class="muted">To'lov usuli</span>
+            <div class="panel-total">${money(methodTotal)}</div></div></div>
+          ${d.by_method.map((m) => {
+            const share = methodTotal ? m.revenue / methodTotal : 0;
+            return `
+              <div class="method-row">
+                <span class="method-icon">${icon(METHOD_ICONS[m.method] || "card")}</span>
+                <div class="method-body">
+                  <div class="method-line"><span>${METHOD_NAMES[m.method] || esc(m.method)}</span>
+                    <b>${money(m.revenue)}</b></div>
+                  <div class="meter"><div style="width:${(share * 100).toFixed(1)}%"></div></div>
+                </div>
+              </div>`;
+          }).join("")}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><div><span class="muted">Tranzaksiyalar</span>
+            <div class="panel-total">${s.orders} ta</div></div></div>
+          ${[["box", "Sotilgan taomlar", s.items], ["check", "Sotuvlar (cheklar)", s.orders],
+             ["cancel", "Bekor qilinganlar", s.cancelled], ["clock", "Hozir ochiq buyurtmalar", s.open]]
+            .map(([ic, name, n]) => `
+              <div class="tx-row"><span class="method-icon">${icon(ic)}</span><span>${name}</span><b>${n} ta</b></div>`).join("")}
+        </section>
+      </div>`;
+    $$("[data-period]", view).forEach((b) => b.addEventListener("click", () => {
+      period = b.dataset.period;
+      try { localStorage.setItem("dash-period", period); } catch { /* ruxsat yo'q */ }
+      render().catch((e) => toast(e.message, true));
+    }));
+    bindChart(view, d.series, labelFor);
+  }
+  await render();
 }
 
 // ------------------------------------------------------------ hisobot
@@ -1473,6 +1689,7 @@ async function viewSettings() {
 // ------------------------------------------------------------ router
 
 const routes = [
+  [/^#\/dashboard$/, viewDashboard, ["reports"]],
   [/^#\/tables$/, viewTables, ["tables"]],
   [/^#\/order\/(\d+)$/, viewOrder, ["tables", "cashier", "reports"]],
   [/^#\/kitchen$/, viewKitchen, ["kitchen"]],

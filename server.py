@@ -955,6 +955,92 @@ def kitchen_ready(conn, user, params, data, query):
     return {"ok": True}
 
 
+# --- bosh sahifa (savdo ko'rsatkichlari)
+
+DASHBOARD_PERIODS = ("today", "week", "month", "year")
+MONTHS = ("Yan", "Fev", "Mar", "Apr", "May", "Iyun", "Iyul", "Avg", "Sen", "Okt", "Noy", "Dek")
+WEEKDAYS = ("Du", "Se", "Ch", "Pa", "Ju", "Sh", "Ya")
+
+
+def period_range(period, today):
+    if period == "today":
+        start = today
+    elif period == "week":
+        start = today - timedelta(days=today.weekday())
+    elif period == "month":
+        start = today.replace(day=1)
+    else:
+        start = today.replace(month=1, day=1)
+    return start, today
+
+
+def paid_between(conn, start, end, extra="", args=()):
+    return conn.execute(
+        f"""SELECT {extra or "COUNT(*) AS orders, COALESCE(SUM(total), 0) AS revenue"}
+            FROM orders o WHERE o.status = 'paid' AND o.closed_at BETWEEN ? AND ?""",
+        (f"{start} 00:00:00", f"{end} 23:59:59", *args),
+    )
+
+
+@route("GET", "/api/dashboard", ("reports",))
+def dashboard(conn, user, params, data, query):
+    period = query.get("period", ["month"])[0]
+    if period not in DASHBOARD_PERIODS:
+        raise ApiError(400, "Noto'g'ri davr")
+    today = datetime.now().date()
+    start, end = period_range(period, today)
+    rng = (f"{start} 00:00:00", f"{end} 23:59:59")
+    where = "o.status = 'paid' AND o.closed_at BETWEEN ? AND ?"
+
+    today_row = dict(paid_between(conn, today, today).fetchone())
+    month_row = dict(paid_between(conn, today.replace(day=1), today).fetchone())
+    summary = dict(paid_between(conn, start, end).fetchone())
+    summary["average"] = summary["revenue"] // summary["orders"] if summary["orders"] else 0
+    summary["items"] = conn.execute(
+        f"""SELECT COALESCE(SUM(i.qty), 0) FROM order_items i JOIN orders o ON o.id = i.order_id
+            WHERE {where}""", rng,
+    ).fetchone()[0]
+    summary["cancelled"] = conn.execute(
+        "SELECT COUNT(*) FROM orders WHERE status = 'cancelled' AND closed_at BETWEEN ? AND ?", rng
+    ).fetchone()[0]
+    summary["open"] = conn.execute("SELECT COUNT(*) FROM orders WHERE status = 'open'").fetchone()[0]
+
+    by_method = {m: 0 for m in PAYMENT_METHODS}
+    for r in conn.execute(
+        f"SELECT payment_method, SUM(total) FROM orders o WHERE {where} GROUP BY payment_method", rng
+    ):
+        by_method[r[0]] = r[1]
+
+    # Grafik: bugun - soatlar, hafta/oy - kunlar, yil - oylar
+    if period == "today":
+        bucket, keys = "CAST(strftime('%H', o.closed_at) AS INTEGER)", list(range(24))
+        labels = [f"{h:02d}" for h in keys]
+    elif period == "year":
+        bucket, keys = "CAST(strftime('%m', o.closed_at) AS INTEGER)", list(range(1, 13))
+        labels = list(MONTHS)
+    else:
+        bucket = "date(o.closed_at)"
+        days = (end - start).days + 1 if period == "month" else 7
+        dates = [start + timedelta(days=i) for i in range(days)]
+        keys = [d.isoformat() for d in dates]
+        labels = [WEEKDAYS[d.weekday()] if period == "week" else str(d.day) for d in dates]
+    values = {r[0]: r[1] for r in conn.execute(
+        f"SELECT {bucket} AS k, SUM(total) FROM orders o WHERE {where} GROUP BY k", rng
+    )}
+    series = [{"label": lab, "value": values.get(k, 0) or 0} for k, lab in zip(keys, labels)]
+
+    return {
+        "period": period,
+        "from": str(start),
+        "to": str(end),
+        "today": today_row,
+        "month": month_row,
+        "summary": summary,
+        "by_method": [{"method": m, "revenue": v} for m, v in by_method.items()],
+        "series": series,
+    }
+
+
 # --- hisobot
 
 

@@ -475,6 +475,25 @@ class ApiTest(unittest.TestCase):
             self.assertTrue(info["main"].startswith("http://"))
             self.assertNotIn(info["main"], info["others"])
 
+    def test_dashboard(self):
+        _, before = self.admin.call("GET", "/api/dashboard?period=today")
+        _, prod = self.admin.call("POST", "/api/products", {"name": "Dashboard taom", "price": 40000})
+        order = self.new_order_with(prod["id"], prod["id"])
+        self.cashier.call("POST", f"/api/orders/{order['id']}/pay", {"method": "click"})
+        for period, size in (("today", 24), ("week", 7), ("year", 12)):
+            status, d = self.admin.call("GET", f"/api/dashboard?period={period}")
+            self.assertEqual(status, 200)
+            self.assertEqual(len(d["series"]), size)
+            self.assertEqual(sum(x["value"] for x in d["series"]), d["summary"]["revenue"])
+        _, after = self.admin.call("GET", "/api/dashboard?period=today")
+        self.assertEqual(after["today"]["revenue"] - before["today"]["revenue"], 80000)
+        self.assertEqual(after["today"]["orders"] - before["today"]["orders"], 1)
+        self.assertEqual(after["summary"]["items"] - before["summary"]["items"], 2)
+        click = next(m for m in after["by_method"] if m["method"] == "click")
+        self.assertGreaterEqual(click["revenue"], 80000)
+        self.assertEqual(self.waiter.call("GET", "/api/dashboard")[0], 403)
+        self.assertEqual(self.admin.call("GET", "/api/dashboard?period=x")[0], 400)
+
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})
