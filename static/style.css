@@ -931,6 +931,8 @@ table.list tr.clickable:hover { background: var(--bg); }
   body { background: #fff; }
   #app, #modal-root, #toast { display: none !important; }
   #print-area { display: block; width: 72mm; font-family: monospace; font-size: 12px; color: #000; }
+  #print-area.paper-58 { width: 48mm; font-size: 11px; }
+  #print-area .r-logo { width: 60%; max-width: 40mm; filter: grayscale(1) invert(1); }
   #print-area h3 { text-align: center; margin: 0 0 4px; }
   #print-area .c { text-align: center; }
   #print-area table { width: 100%; border-collapse: collapse; }
@@ -1112,3 +1114,23 @@ a.integration-card:hover { border-color: var(--primary); box-shadow: 0 6px 18px 
 @media (max-width: 640px) { .grid-3 { grid-template-columns: 1fr; } }
 .admin-toggle { margin-bottom: 10px; background: #fbf5ee; border-color: #e9d3bd; }
 .admin-toggle b { font-weight: 700; }
+
+/* --- sozlamalar > chek */
+.receipt-settings { display: grid; grid-template-columns: minmax(0, 560px) auto; gap: 20px; align-items: start; }
+.receipt-settings textarea { width: 100%; font: inherit; resize: vertical; }
+.receipt-settings .perm-grid { margin: 10px 0 14px; }
+.receipt-preview-wrap { position: sticky; top: 12px; }
+.receipt-preview {
+  width: 300px; background: #fff; color: #000; padding: 18px 16px 22px; font-family: monospace; font-size: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .12); border-radius: 4px;
+  -webkit-mask: linear-gradient(#000 0 0) top/100% calc(100% - 8px) no-repeat, radial-gradient(circle 5px at 50% 100%, transparent 98%, #000) bottom/12px 8px repeat-x;
+  mask: linear-gradient(#000 0 0) top/100% calc(100% - 8px) no-repeat, radial-gradient(circle 5px at 50% 100%, transparent 98%, #000) bottom/12px 8px repeat-x;
+}
+.receipt-preview.paper-58 { width: 220px; font-size: 11px; }
+.receipt-preview h3 { text-align: center; margin: 0 0 4px; font-size: 15px; }
+.receipt-preview .c { text-align: center; }
+.receipt-preview table { width: 100%; border-collapse: collapse; }
+.receipt-preview td { padding: 2px 0; vertical-align: top; }
+.receipt-preview hr { border: 0; border-top: 1px dashed #000; margin: 8px 0; }
+.receipt-preview .r-logo { width: 55%; filter: grayscale(1) invert(1); margin-bottom: 6px; }
+@media (max-width: 900px) { .receipt-settings { grid-template-columns: 1fr; } .receipt-preview-wrap { position: static; } }

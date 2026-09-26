@@ -51,7 +51,9 @@ Linux/macOS: `python3 desktop.py` (yoki faqat server: `python3 server.py`)
   tranzaksiya turlari (takrorlanmaydi, o'zgartirilmaydi; bajarilgani bekor qilinadi, o'chirilmaydi)
 - 🧾 **Xizmat haqi** — stolda o'tirganlarga foiz (⚙️ Sozlamalar); har bir zal uchun alohida foiz qo'yish mumkin
 - 💰 **Kassa** — naqd / karta / Payme / Click, chegirma, qaytim hisoblash
-- 🖨️ **Chek** — 58/80 mm termoprinterga chop etish
+- 🖨️ **Chek** — 58/80 mm termoprinterga chop etish. **Sozlamalar → Chek**: logo, kafe nomi, manzil/telefon,
+  chek raqami, sana, stol, ofitsiant, kassir, mijoz, taom narxi, xizmat haqi, chegirma, to'lov turi va
+  pastki matn — har biri chiqish-chiqmasligi belgilanadi, o'ngda jonli namuna
 - 🍳 **Oshxona printeri** — har bir taom o'ziga biriktirilgan printerdan chiqadi (Oshxona, Salat, Bar...)
 - 🖥️ **Oshxona ekrani** — oshxona kompyuterida buyurtmalar ko'rinadi, yangi buyurtmada ovoz chiqadi
 - 📊 **Hisobot** — davr bo'yicha tushum, o'rtacha chek, to'lov turlari, ko'p sotilgan taomlar, ofitsiantlar

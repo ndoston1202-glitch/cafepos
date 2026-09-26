@@ -436,6 +436,14 @@ def to_int(value, field, minimum=None):
 
 
 DEFAULT_SETTINGS = {"cafe_name": "CafePOS", "service_percent": "0"}
+# Chekda nimalar chiqadi (Sozlamalar > Chek)
+RECEIPT_DEFAULTS = {
+    "show_logo": False, "show_cafe_name": True, "header_text": "",
+    "show_order_number": True, "show_date": True, "show_place": True, "show_waiter": True,
+    "show_cashier": False, "show_customer": True, "show_item_price": True,
+    "show_service": True, "show_discount": True, "show_payment": True,
+    "footer_text": "Xaridingiz uchun rahmat!", "paper_width": 80,
+}
 DEFAULT_PIN = "1234"
 PIN_LENGTH = 4
 
@@ -445,7 +453,31 @@ def get_settings(conn):
     # "_" bilan boshlanadigan kalitlar - ichki sirlar, tashqariga berilmaydi
     settings.update({r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings WHERE key NOT LIKE '\\_%' ESCAPE '\\'")})
     settings["service_percent"] = float(settings["service_percent"] or 0)
+    receipt = dict(RECEIPT_DEFAULTS)
+    try:
+        receipt.update(json.loads(settings.get("receipt") or "{}"))
+    except ValueError:
+        pass
+    settings["receipt"] = receipt
     return settings
+
+
+def receipt_values(data):
+    if not isinstance(data, dict):
+        raise ApiError(400, "Chek sozlamalari noto'g'ri")
+    out = {}
+    for key, default in RECEIPT_DEFAULTS.items():
+        value = data.get(key, default)
+        if isinstance(default, bool):
+            out[key] = bool(value)
+        elif key == "paper_width":
+            out[key] = 58 if str(value) == "58" else 80
+        else:
+            text = str(value or "").strip()
+            if len(text) > 300:
+                raise ApiError(400, "Chek matni juda uzun (300 belgigacha)")
+            out[key] = text
+    return out
 
 
 def to_percent(value, field):
@@ -492,11 +524,14 @@ def order_items_with_printer(conn, order_id):
 
 def order_detail(conn, order_id):
     order = conn.execute(
-        """SELECT o.*, t.name AS table_name, t.hall_id, h.name AS hall_name, w.full_name AS waiter_name
+        """SELECT o.*, t.name AS table_name, t.hall_id, h.name AS hall_name, w.full_name AS waiter_name,
+                  k.full_name AS cashier_name, c.name AS customer_name
            FROM orders o
            LEFT JOIN tables t ON t.id = o.table_id
            LEFT JOIN halls h ON h.id = t.hall_id
            LEFT JOIN users w ON w.id = o.waiter_id
+           LEFT JOIN users k ON k.id = o.cashier_id
+           LEFT JOIN customers c ON c.id = o.customer_id
            WHERE o.id = ?""",
         (order_id,),
     ).fetchone()
@@ -691,6 +726,8 @@ def save_settings(conn, user, params, data, query):
         values["cafe_name"] = (data["cafe_name"] or "").strip() or DEFAULT_SETTINGS["cafe_name"]
     if "service_percent" in data:
         values["service_percent"] = str(to_percent(data["service_percent"] or 0, "service_percent"))
+    if "receipt" in data:
+        values["receipt"] = json.dumps(receipt_values(data["receipt"]), ensure_ascii=False)
     for key, value in values.items():
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2675,6 +2712,8 @@ def _a_settings(ctx):
     fields = [change("Kafe nomi", b.get("cafe_name"), s.get("cafe_name")),
               change("Xizmat haqi", b.get("service_percent"), s.get("service_percent"), lambda v: f"{v:g}%")]
     fields = [f for f in fields if f]
+    if b.get("receipt") != s.get("receipt"):
+        fields.append(["Chek", "ko'rinishi o'zgartirildi"])
     if not fields:
         return None
     return entry("Sozlamalar o'zgartirildi", ", ".join(f"{f[0]}: {f[1]}" for f in fields), fields)

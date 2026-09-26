@@ -1146,6 +1146,22 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(a.call("POST", "/api/users", {"first_name": "Dub2", "phone": "94 700 11 22",
                                                        "role": "staff", "permissions": ["tables"], "pin": "6062"})[0], 409)
 
+    def test_receipt_settings(self):
+        _, s = self.admin.call("GET", "/api/settings")
+        self.assertTrue(s["receipt"]["show_cafe_name"])
+        self.assertEqual(s["receipt"]["footer_text"], "Xaridingiz uchun rahmat!")
+        status, s = self.admin.call("PUT", "/api/settings", {"receipt": {
+            "show_waiter": False, "show_logo": True, "header_text": " Tel: 90 123 ", "paper_width": "58", "junk": 1}})
+        self.assertEqual(status, 200)
+        r = s["receipt"]
+        self.assertEqual((r["show_waiter"], r["show_logo"], r["header_text"], r["paper_width"]), (False, True, "Tel: 90 123", 58))
+        self.assertNotIn("junk", r)
+        self.assertEqual(self.admin.call("PUT", "/api/settings", {"receipt": {"footer_text": "x" * 400}})[0], 400)
+        self.assertEqual(self.waiter.call("PUT", "/api/settings", {"receipt": {}})[0], 403)
+        _, j = self.admin.call("GET", "/api/journal?category=settings")
+        self.assertIn("Chek", json.dumps(j["items"][0], ensure_ascii=False))
+        self.admin.call("PUT", "/api/settings", {"receipt": {}})  # standartga qaytarish
+
 
 
 class PrintingTest(unittest.TestCase):

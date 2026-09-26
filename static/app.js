@@ -412,6 +412,7 @@ const SETTINGS_TABS = [
   { perm: "settings", href: "#/settings", icon: "settings", name: "Umumiy" },
   { perm: "halls", href: "#/tables-admin", icon: "halls", name: "Zallar va stollar" },
   { perm: "printers", href: "#/printers", icon: "printer", name: "Printerlar" },
+  { perm: "settings", href: "#/settings/receipt", icon: "sales", name: "Chek" },
 ];
 
 function visibleNav() {
@@ -855,33 +856,56 @@ function payModal(order, onPaid) {
   });
 }
 
-function printReceipt(order) {
-  $("#print-area").innerHTML = `
-    <h3>${esc(state.settings.cafe_name)}</h3>
-    <div class="c">Buyurtma #${order.id} · ${esc(place(order))}</div>
-    <div class="c">${esc(order.closed_at || order.created_at)}</div>
-    <div class="c">Ofitsiant: ${esc(order.waiter_name || "-")}</div>
+// Chek ko'rinishi - Sozlamalar > Chek bo'limidagi belgilarga qarab
+function receiptHtml(order, cfg) {
+  cfg = cfg || state.settings.receipt || {};
+  const row = (label, value, bold) => `<tr><td>${bold ? `<b>${label}</b>` : label}</td>
+    <td style="text-align:right">${bold ? `<b>${value}</b>` : value}</td></tr>`;
+  const lines = (text) => esc(text).split("\n").map((l) => `<div class="c">${l}</div>`).join("");
+  const info = [
+    cfg.show_order_number && `Chek #${order.id}`,
+    cfg.show_place && esc(place(order)),
+  ].filter(Boolean).join(" · ");
+  return `
+    ${cfg.show_logo ? `<div class="c"><img class="r-logo" src="/img/logo.png" alt=""></div>` : ""}
+    ${cfg.show_cafe_name ? `<h3>${esc(state.settings.cafe_name)}</h3>` : ""}
+    ${cfg.header_text ? lines(cfg.header_text) : ""}
+    ${info ? `<div class="c">${info}</div>` : ""}
+    ${cfg.show_date ? `<div class="c">${esc((order.closed_at || order.created_at || "").slice(0, 16))}</div>` : ""}
+    ${cfg.show_waiter && order.waiter_name ? `<div>Ofitsiant: ${esc(order.waiter_name)}</div>` : ""}
+    ${cfg.show_cashier && order.cashier_name ? `<div>Kassir: ${esc(order.cashier_name)}</div>` : ""}
+    ${cfg.show_customer && order.customer_name ? `<div>Mijoz: ${esc(order.customer_name)}</div>` : ""}
     <hr>
     <table>
-      ${order.items.map((i) => `
+      ${order.items.map((i) => cfg.show_item_price ? `
         <tr><td colspan="2">${esc(i.name)}</td></tr>
-        <tr><td>${i.qty} x ${money(i.price)}</td><td style="text-align:right">${money(i.qty * i.price)}</td></tr>
-        ${i.returned_qty ? `<tr><td colspan="2">  qaytarildi: ${i.returned_qty}</td></tr>` : ""}`).join("")}
+        ${row(`${i.qty} x ${money(i.price)}`, money(i.qty * i.price))}`
+        : row(`${esc(i.name)} x${i.qty}`, money(i.qty * i.price))).join("")}
+      ${order.items.filter((i) => i.returned_qty).map((i) => `<tr><td colspan="2">  ${esc(i.name)}: ${i.returned_qty} ta qaytarildi</td></tr>`).join("")}
     </table>
     <hr>
     <table>
-      ${order.service || order.discount ? `<tr><td>Summa</td><td style="text-align:right">${money(order.subtotal)}</td></tr>` : ""}
-      ${order.service ? `<tr><td>Xizmat haqi ${percent(order.service_percent)}</td><td style="text-align:right">+${money(order.service)}</td></tr>` : ""}
-      ${order.discount ? `<tr><td>Chegirma</td><td style="text-align:right">-${money(order.discount)}</td></tr>` : ""}
-      <tr><td><b>JAMI</b></td><td style="text-align:right"><b>${money(order.total)}</b></td></tr>
-      ${order.returned ? `<tr><td>Qaytarildi</td><td style="text-align:right">-${money(order.returned)}</td></tr>
-        <tr><td><b>YAKUNIY</b></td><td style="text-align:right"><b>${money(order.total - order.returned)}</b></td></tr>` : ""}
-      ${order.payment_method ? `<tr><td>To'lov</td><td style="text-align:right">${METHOD_NAMES[order.payment_method]}</td></tr>` : ""}
+      ${(cfg.show_service && order.service) || (cfg.show_discount && order.discount) ? row("Summa", money(order.subtotal)) : ""}
+      ${cfg.show_service && order.service ? row(`Xizmat haqi ${percent(order.service_percent)}`, "+" + money(order.service)) : ""}
+      ${cfg.show_discount && order.discount ? row("Chegirma", "-" + money(order.discount)) : ""}
+      ${row("JAMI", money(order.total), true)}
+      ${order.returned ? row("Qaytarildi", "-" + money(order.returned)) + row("YAKUNIY", money(order.total - order.returned), true) : ""}
+      ${cfg.show_payment && order.payment_method ? row("To'lov", METHOD_NAMES[order.payment_method] || "") : ""}
     </table>
     <hr>
-    <div class="c">${order.status === "paid" ? "Xaridingiz uchun rahmat!" : order.status === "refunded"
-      ? "BEKOR QILINGAN CHEK" : "Hisob (to'lanmagan)"}</div>`;
-  window.print();
+    ${order.status === "refunded" ? `<div class="c"><b>BEKOR QILINGAN CHEK</b></div>`
+      : order.status === "open" ? `<div class="c">Hisob (to'lanmagan)</div>` : ""}
+    ${cfg.footer_text && order.status !== "refunded" ? lines(cfg.footer_text) : ""}`;
+}
+
+function printReceipt(order) {
+  const cfg = state.settings.receipt || {};
+  const area = $("#print-area");
+  area.className = cfg.paper_width === 58 ? "paper-58" : "";
+  area.innerHTML = receiptHtml(order, cfg);
+  const img = $("img", area);
+  if (img && !img.complete) img.onload = img.onerror = () => window.print();
+  else window.print();
 }
 
 
@@ -3058,6 +3082,74 @@ async function viewCustomerBot(cfgArg) {
   }));
 }
 
+// Sozlamalar > Chek: chekda nimalar chiqishini belgilash, o'ngda jonli namuna
+const RECEIPT_OPTIONS = [
+  ["show_logo", "Logo"], ["show_cafe_name", "Kafe nomi"], ["show_order_number", "Chek raqami"],
+  ["show_date", "Sana va vaqt"], ["show_place", "Stol / zal"], ["show_waiter", "Ofitsiant"],
+  ["show_cashier", "Kassir"], ["show_customer", "Mijoz"], ["show_item_price", "Taom narxi (soni × narx)"],
+  ["show_service", "Xizmat haqi"], ["show_discount", "Chegirma"], ["show_payment", "To'lov turi"],
+];
+
+async function viewReceiptSettings() {
+  await loadSettings();
+  const cfg = Object.assign({}, state.settings.receipt);
+  const sample = {
+    id: 125, type: "dine_in", table_name: "Stol 4", hall_name: "Asosiy zal", status: "paid",
+    closed_at: new Date().toISOString().slice(0, 10) + " 14:35", waiter_name: "Aziz", cashier_name: state.user.full_name,
+    customer_name: "Ali Valiyev", payment_method: "cash",
+    items: [{ name: "Osh", qty: 2, price: 35000 }, { name: "Choy", qty: 1, price: 5000 }, { name: "Salat", qty: 1, price: 18000 }],
+    subtotal: 93000, service_percent: 10, service: 9300, discount: 2300, total: 100000, returned: 0,
+  };
+  const view = layout(`
+    <div class="receipt-settings">
+      <form class="panel settings" id="rf">
+        <h2>🧾 Chek</h2>
+        <p class="muted">Chekda nimalar chiqishini belgilang. O'ngda natija darhol ko'rinadi.</p>
+        <div class="perm-grid">
+          ${RECEIPT_OPTIONS.map(([k, name]) => `
+            <label class="perm-item"><input type="checkbox" name="${k}" ${cfg[k] ? "checked" : ""}><span>${name}</span></label>`).join("")}
+        </div>
+        <label><span>Tepadagi matn (manzil, telefon...)</span>
+          <textarea name="header_text" rows="2" maxlength="300" placeholder="Masalan: Toshkent, Chilonzor 5\nTel: +998 90 123 45 67">${esc(cfg.header_text || "")}</textarea></label>
+        <label><span>Pastdagi matn</span>
+          <textarea name="footer_text" rows="2" maxlength="300" placeholder="Masalan: Xaridingiz uchun rahmat!">${esc(cfg.footer_text || "")}</textarea></label>
+        <span class="field-label">Qog'oz kengligi</span>
+        <div class="kind-switch">
+          <label class="role-card"><input type="radio" name="paper_width" value="80" ${cfg.paper_width !== 58 ? "checked" : ""}><span>80 mm</span></label>
+          <label class="role-card"><input type="radio" name="paper_width" value="58" ${cfg.paper_width === 58 ? "checked" : ""}><span>58 mm</span></label>
+        </div>
+        <div class="actions"><button class="btn primary">💾 Saqlash</button></div>
+      </form>
+      <div class="receipt-preview-wrap">
+        <span class="field-label">Namuna</span>
+        <div class="receipt-preview" id="preview"></div>
+      </div>
+    </div>`);
+  const form = $("#rf", view);
+  const read = () => {
+    const out = {};
+    RECEIPT_OPTIONS.forEach(([k]) => { out[k] = form[k].checked; });
+    out.header_text = form.header_text.value;
+    out.footer_text = form.footer_text.value;
+    out.paper_width = +$("input[name=paper_width]:checked", form).value;
+    return out;
+  };
+  const draw = () => {
+    const c = read();
+    const p = $("#preview", view);
+    p.className = "receipt-preview" + (c.paper_width === 58 ? " paper-58" : "");
+    p.innerHTML = receiptHtml(sample, c);
+  };
+  form.addEventListener("input", draw);
+  form.addEventListener("change", draw);
+  draw();
+  form.addEventListener("submit", safe(async (e) => {
+    e.preventDefault();
+    state.settings = await api("PUT", "/api/settings", { receipt: read() });
+    toast("Chek sozlamalari saqlandi ✅");
+  }));
+}
+
 // ------------------------------------------------------------ router
 
 const routes = [
@@ -3079,6 +3171,7 @@ const routes = [
   [/^#\/tables-admin$/, viewTablesAdmin, ["halls"]],
   [/^#\/users$/, viewUsers, ["users"]],
   [/^#\/settings$/, viewSettings, ["settings"]],
+  [/^#\/settings\/receipt$/, viewReceiptSettings, ["settings"]],
   [/^#\/journal$/, viewJournal, ["journal"]],
   [/^#\/integrations$/, viewIntegrations, ["integrations"]],
   [/^#\/integrations\/telegram$/, viewTelegram, ["integrations"]],
