@@ -1516,11 +1516,6 @@ def cancel_finance_entry(conn, user, params, data, query):
            WHERE id = ?""",
         (now(), user["id"], (data.get("reason") or "").strip() or None, params[0]),
     )
-    order = dict(conn.execute("SELECT * FROM orders WHERE id = ?", (params[0],)).fetchone())
-    if order["customer_id"]:
-        notify_customer(conn, get_customer(conn, order["customer_id"]),
-                        f"↩️ <b>Xarid bekor qilindi</b>\nBuyurtma #{order['id']} · {fmt_money(order['total'] - order['returned'])}",
-                        "notify_sales")
     return {"ok": True}
 
 
@@ -1664,6 +1659,11 @@ def cancel_sale(conn, user, params, data, query):
         "UPDATE orders SET status = 'refunded', refunded_at = ?, refunded_by = ?, refund_reason = ? WHERE id = ?",
         (now(), user["id"], (data.get("reason") or "").strip() or None, params[0]),
     )
+    order = dict(conn.execute("SELECT * FROM orders WHERE id = ?", (params[0],)).fetchone())
+    if order["customer_id"]:
+        notify_customer(conn, get_customer(conn, order["customer_id"]),
+                        f"↩️ <b>Xarid bekor qilindi</b>\nBuyurtma #{order['id']} · {fmt_money(order['total'] - order['returned'])}",
+                        "notify_sales")
     return {"ok": True}
 
 

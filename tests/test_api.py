@@ -1162,6 +1162,15 @@ class ApiTest(unittest.TestCase):
         self.assertIn("Chek", json.dumps(j["items"][0], ensure_ascii=False))
         self.admin.call("PUT", "/api/settings", {"receipt": {}})  # standartga qaytarish
 
+    def test_cancel_finance_entry_without_order(self):
+        _, types = self.admin.call("GET", "/api/finance/types")
+        ftype = next(t for t in types if t["direction"] == "in")
+        _, e = self.admin.call("POST", "/api/finance/entries", {"type_id": ftype["id"], "account": "cash", "amount": 1000})
+        for _ in range(3):  # id ni buyurtmalar sonidan kattaroq qilamiz
+            _, e = self.admin.call("POST", "/api/finance/entries", {"type_id": ftype["id"], "account": "cash", "amount": 1000})
+        status, _ = self.admin.call("POST", f"/api/finance/entries/{e['id'] + 100000 - 100000}/cancel", {"reason": "x"})
+        self.assertEqual(status, 200)
+
 
 
 class PrintingTest(unittest.TestCase):
