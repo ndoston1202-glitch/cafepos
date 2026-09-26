@@ -518,7 +518,7 @@ class ApiTest(unittest.TestCase):
         _, e1 = self.admin.call("POST", "/api/finance/entries",
                                 {"type_id": topup["id"], "account": "cash", "amount": 100000, "comment": "Ali aka"})
         _, e2 = self.admin.call("POST", "/api/finance/entries", {"type_id": rent["id"], "account": "cash", "amount": 30000})
-        self.assertEqual(self.admin.call("POST", "/api/finance/entries", {"type_id": rent["id"], "account": "bank", "amount": 1})[0], 400)
+        self.assertEqual(self.admin.call("POST", "/api/finance/entries", {"type_id": rent["id"], "account": "safe", "amount": 1})[0], 400)
         self.assertEqual(self.admin.call("POST", "/api/finance/entries", {"type_id": rent["id"], "account": "cash", "amount": 0})[0], 400)
         _, bal = self.admin.call("GET", "/api/finance/balance")
         self.assertEqual(next(a for a in bal["accounts"] if a["account"] == "cash")["balance"] - cash0, 70000)
@@ -598,6 +598,76 @@ class ApiTest(unittest.TestCase):
         self.assertEqual((row["status"], row["cancel_reason"]), ("cancelled", "xato chek"))
         _, detail = self.admin.call("GET", f"/api/orders/{order['id']}")
         self.assertEqual(detail["status"], "refunded")  # o'chirilmadi, tarixda qoldi
+
+    def test_crm_customers_and_debts(self):
+        from datetime import date, timedelta
+        today = date.today()
+        # Mijoz: telefon normallashtiriladi va takrorlanmaydi
+        status, ali = self.admin.call("POST", "/api/customers", {"name": "Ali Valiyev", "phone": "90 123-45-67", "gender": "m"})
+        self.assertEqual((status, ali["phone"]), (200, "+998901234567"))
+        self.assertEqual(self.admin.call("POST", "/api/customers", {"name": "Boshqa", "phone": "+998901234567", "gender": "f"})[0], 409)
+        self.assertEqual(self.admin.call("POST", "/api/customers", {"name": "Ali", "phone": "12", "gender": "m"})[0], 400)
+        self.assertEqual(self.admin.call("POST", "/api/customers", {"name": "Ali", "phone": "901112233", "gender": "x"})[0], 400)
+        _, found = self.admin.call("GET", "/api/customers?q=4567")
+        self.assertIn(ali["id"], [c["id"] for c in found])
+        _, edited = self.admin.call("PUT", f"/api/customers/{ali['id']}", {"name": "Ali Valiyev", "phone": "901234567", "gender": "m"})
+        self.assertEqual(edited["name"], "Ali Valiyev")
+
+        # Qarzga sotish: mijoz va muddat shart
+        _, prod = self.admin.call("POST", "/api/products", {"name": "Qarz taom", "price": 60000})
+        order = self.new_order_with(prod["id"])
+        self.assertEqual(self.cashier.call("POST", f"/api/orders/{order['id']}/pay", {"method": "debt"})[0], 400)
+        _, bal0 = self.admin.call("GET", "/api/finance/balance")
+        status, paid = self.cashier.call("POST", f"/api/orders/{order['id']}/pay", {
+            "method": "debt", "customer_id": ali["id"], "due_date": str(today - timedelta(days=2))})
+        self.assertEqual(status, 200)
+        _, bal1 = self.admin.call("GET", "/api/finance/balance")
+        self.assertEqual(bal1["total"], bal0["total"])  # qarzga sotuv kassaga pul keltirmaydi
+
+        # Qo'lda qarz: 2 kundan keyin (vaqti keldi) va 10 kundan keyin (muddati bor)
+        self.admin.call("POST", f"/api/customers/{ali['id']}/debts", {"amount": 20000, "due_date": str(today + timedelta(days=2))})
+        self.admin.call("POST", f"/api/customers/{ali['id']}/debts", {"amount": 30000, "due_date": str(today + timedelta(days=10))})
+        _, debts = self.admin.call("GET", "/api/debts")
+        mine = {d["amount"]: d for d in debts["debts"] if d["customer_id"] == ali["id"]}
+        self.assertEqual(mine[paid["total"]]["bucket"], "overdue")
+        self.assertEqual(mine[20000]["bucket"], "due")
+        self.assertEqual(mine[30000]["bucket"], "later")
+
+        # To'lov usullari -> hisoblar: naqd->naqd, click->karta, terminal/ko'chirish->hisob raqam
+        acc = lambda b, k: next(a for a in b["accounts"] if a["account"] == k)["balance"]
+        overdue = mine[paid["total"]]
+        self.assertEqual(self.admin.call("POST", f"/api/debts/{overdue['id']}/pay", {"amount": 10, "method": "bitcoin"})[0], 400)
+        self.assertEqual(self.admin.call("POST", f"/api/debts/{overdue['id']}/pay", {"amount": 10**9, "method": "cash"})[0], 400)
+        for method, account, amount in (("cash", "cash", 10000), ("click", "card", 20000),
+                                        ("terminal", "bank", 5000), ("transfer", "bank", 5000)):
+            _, before = self.admin.call("GET", "/api/finance/balance")
+            _, res = self.admin.call("POST", f"/api/debts/{overdue['id']}/pay", {"amount": amount, "method": method})
+            self.assertEqual(res["account"], account)
+            _, after = self.admin.call("GET", "/api/finance/balance")
+            self.assertEqual(acc(after, account) - acc(before, account), amount)
+
+        # Qolganini to'lasa - qarz yopiladi va ro'yxatdan chiqadi
+        left = paid["total"] - 40000
+        _, res = self.admin.call("POST", f"/api/debts/{overdue['id']}/pay", {"method": "cash"})
+        self.assertEqual(res["remaining"], 0)
+        self.assertEqual(self.admin.call("POST", f"/api/debts/{overdue['id']}/pay", {"method": "cash"})[0], 409)
+        _, debts = self.admin.call("GET", "/api/debts")
+        self.assertNotIn(overdue["id"], [d["id"] for d in debts["debts"]])
+
+        # Mijoz kartasi: qarz, to'langan, qoldiq; to'lovni bekor qilish qarzni qayta ochadi
+        _, card = self.admin.call("GET", f"/api/customers/{ali['id']}")
+        self.assertEqual(card["remaining"], 50000)
+        last = card["payments"][0]
+        self.assertEqual(last["amount"], left)
+        self.assertEqual(self.admin.call("POST", f"/api/debt-payments/{last['id']}/cancel", {"reason": "xato"})[0], 200)
+        self.assertEqual(self.admin.call("POST", f"/api/debt-payments/{last['id']}/cancel")[0], 409)
+        _, card = self.admin.call("GET", f"/api/customers/{ali['id']}")
+        self.assertEqual(card["remaining"], 50000 + left)
+
+        # Qarzga sotilgan savdoni bekor qilish - to'lovlar bor ekan, avval ular bekor qilinadi
+        self.assertEqual(self.admin.call("POST", f"/api/finance/sales/{order['id']}/cancel")[0], 409)
+        # Ofitsiantda CRM ruxsati yo'q
+        self.assertEqual(self.waiter.call("GET", "/api/debts")[0], 403)
 
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")

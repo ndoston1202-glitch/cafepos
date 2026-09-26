@@ -38,14 +38,20 @@ SESSION_DAYS = 7
 
 ROLES = ("admin", "cashier", "waiter", "cook")
 # Bo'limlarga kirish ruxsatlari
-PERMISSIONS = ("tables", "cashier", "kitchen", "reports", "menu", "finance", "halls", "printers", "users", "settings")
+PERMISSIONS = ("tables", "cashier", "kitchen", "reports", "menu", "crm", "finance", "halls", "printers", "users", "settings")
 ROLE_DEFAULTS = {
     "admin": PERMISSIONS,
-    "cashier": ("tables", "cashier", "kitchen", "reports"),
+    "cashier": ("tables", "cashier", "kitchen", "reports", "crm"),
     "waiter": ("tables",),
     "cook": ("kitchen",),
 }
-PAYMENT_METHODS = ("cash", "card", "payme", "click")
+# Buyurtma to'lov usullari ("debt" = qarzga - pul keyin CRM > Qarzlar orqali tushadi)
+PAYMENT_METHODS = ("cash", "card", "payme", "click", "debt")
+# Moliya hisoblari (kassa balansi)
+FINANCE_ACCOUNTS = ("cash", "card", "payme", "click", "bank")
+# Qarz to'lash usullari -> qaysi hisobga tushadi
+DEBT_PAY_METHODS = {"cash": "cash", "click": "card", "terminal": "bank", "transfer": "bank"}
+DUE_SOON_DAYS = 3
 SYSTEM_FINANCE_TYPES = (("Mijoz balansini to'ldirish", "in"), ("Ta'minotchiga pul berish", "out"))
 PRINTER_KINDS = ("system", "network", "windows")  # windows = eski versiyadagi ulashilgan printer
 
@@ -161,6 +167,40 @@ CREATE TABLE IF NOT EXISTS finance_entries (
     cancel_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_finance_created ON finance_entries(created_at);
+CREATE TABLE IF NOT EXISTS customers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    phone TEXT NOT NULL UNIQUE,
+    gender TEXT NOT NULL,              -- 'm' erkak, 'f' ayol
+    created_at TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER NOT NULL REFERENCES customers(id),
+    order_id INTEGER REFERENCES orders(id),
+    amount INTEGER NOT NULL,
+    due_date TEXT NOT NULL,
+    comment TEXT,
+    status TEXT NOT NULL DEFAULT 'open',   -- open / closed / cancelled
+    created_at TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS debt_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    debt_id INTEGER NOT NULL REFERENCES debts(id),
+    customer_id INTEGER NOT NULL REFERENCES customers(id),
+    amount INTEGER NOT NULL,
+    method TEXT NOT NULL,              -- cash / click / terminal / transfer
+    account TEXT NOT NULL,             -- qaysi hisobga tushdi: cash / card / bank
+    status TEXT NOT NULL DEFAULT 'done',
+    created_at TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id),
+    cancelled_at TEXT,
+    cancelled_by INTEGER REFERENCES users(id),
+    cancel_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_debts_customer ON debts(customer_id);
 """
 
 # Eski bazalarga yangi ustunlar qo'shiladi (ma'lumot o'chmaydi)
@@ -783,6 +823,16 @@ def pay_order(conn, user, params, data, query):
         raise ApiError(400, "Chegirma summadan katta bo'lishi mumkin emas")
     order["discount"] = discount
     apply_totals(order, order["service_percent"])
+    if method == "debt":  # qarzga: mijoz va to'lov muddati shart
+        customer = get_customer(conn, data.get("customer_id"))
+        due = parse_due_date(data.get("due_date"))
+        if order["total"] <= 0:
+            raise ApiError(400, "Qarzga yoziladigan summa yo'q")
+        conn.execute(
+            """INSERT INTO debts (customer_id, order_id, amount, due_date, comment, created_at, created_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (customer["id"], order["id"], order["total"], due, f"Buyurtma #{order['id']}", now(), user["id"]),
+        )
     conn.execute(
         """UPDATE orders SET status = 'paid', discount = ?, service_percent = ?, service = ?, total = ?,
                   payment_method = ?, cashier_id = ?, closed_at = ? WHERE id = ?""",
@@ -1016,6 +1066,188 @@ def kitchen_ready(conn, user, params, data, query):
     return {"ok": True}
 
 
+# --- CRM: mijozlar va qarzlar
+
+
+def normalize_phone(phone):
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 9:  # 901234567 -> 998901234567
+        digits = "998" + digits
+    if len(digits) < 9 or len(digits) > 15:
+        raise ApiError(400, "Telefon raqamini to'g'ri kiriting (masalan +998 90 123 45 67)")
+    return "+" + digits
+
+
+def get_customer(conn, customer_id):
+    row = conn.execute("SELECT * FROM customers WHERE id = ?", (customer_id or 0,)).fetchone()
+    if not row:
+        raise ApiError(404 if customer_id else 400, "Mijozni tanlang" if not customer_id else "Mijoz topilmadi")
+    return dict(row)
+
+
+def parse_due_date(value):
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date().isoformat()
+    except (TypeError, ValueError):
+        raise ApiError(400, "To'lov muddatini tanlang")
+
+
+def debt_paid(conn, debt_id):
+    return conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM debt_payments WHERE debt_id = ? AND status = 'done'", (debt_id,)
+    ).fetchone()[0]
+
+
+def debt_bucket(due_date, today):
+    due = datetime.strptime(due_date, "%Y-%m-%d").date()
+    days = (due - today).days
+    if days < 0:
+        return "overdue", days
+    return ("due" if days <= DUE_SOON_DAYS else "later"), days
+
+
+def debts_query(conn, where="", args=()):
+    today = datetime.now().date()
+    result = []
+    for r in conn.execute(
+        f"""SELECT d.*, c.name AS customer_name, c.phone AS customer_phone,
+                   COALESCE((SELECT SUM(amount) FROM debt_payments p WHERE p.debt_id = d.id AND p.status = 'done'), 0) AS paid
+            FROM debts d JOIN customers c ON c.id = d.customer_id
+            WHERE d.status != 'cancelled' {where} ORDER BY d.due_date, d.id""", args
+    ):
+        d = dict(r)
+        d["remaining"] = d["amount"] - d["paid"]
+        d["bucket"], d["days"] = debt_bucket(d["due_date"], today)
+        if d["remaining"] <= 0:
+            d["bucket"] = "closed"
+        result.append(d)
+    return result
+
+
+def customer_values(data):
+    name = clean_name(data.get("name"))
+    if len(name) < 2:
+        raise ApiError(400, "Mijoz ismini kiriting")
+    if data.get("gender") not in ("m", "f"):
+        raise ApiError(400, "Jinsini tanlang")
+    return name, normalize_phone(data.get("phone")), data["gender"]
+
+
+@route("GET", "/api/customers", ("crm", "cashier"))
+def list_customers(conn, user, params, data, query):
+    q = (query.get("q", [""])[0] or "").strip()
+    sql = """SELECT c.*,
+                    COALESCE((SELECT SUM(d.amount) FROM debts d WHERE d.customer_id = c.id AND d.status != 'cancelled'), 0)
+                  - COALESCE((SELECT SUM(p.amount) FROM debt_payments p WHERE p.customer_id = c.id AND p.status = 'done'), 0)
+                    AS debt
+             FROM customers c"""
+    args = []
+    if q:
+        sql += " WHERE c.name LIKE ? OR c.phone LIKE ?"
+        digits = re.sub(r"\D", "", q)
+        args = [f"%{q}%", f"%{digits or q}%"]
+    return rows(conn.execute(sql + " ORDER BY c.name LIMIT 500", args))
+
+
+@route("POST", "/api/customers", ("crm", "cashier"))
+def create_customer(conn, user, params, data, query):
+    name, phone, gender = customer_values(data)
+    if conn.execute("SELECT 1 FROM customers WHERE phone = ?", (phone,)).fetchone():
+        raise ApiError(409, f"{phone} raqamli mijoz allaqachon bor")
+    cur = conn.execute(
+        "INSERT INTO customers (name, phone, gender, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+        (name, phone, gender, now(), user["id"]),
+    )
+    return get_customer(conn, cur.lastrowid)
+
+
+@route("PUT", r"/api/customers/(\d+)", ("crm",))
+def update_customer(conn, user, params, data, query):
+    get_customer(conn, params[0])
+    name, phone, gender = customer_values(data)
+    if conn.execute("SELECT 1 FROM customers WHERE phone = ? AND id != ?", (phone, params[0])).fetchone():
+        raise ApiError(409, f"{phone} raqamli boshqa mijoz bor")
+    conn.execute("UPDATE customers SET name = ?, phone = ?, gender = ? WHERE id = ?", (name, phone, gender, params[0]))
+    return get_customer(conn, params[0])
+
+
+@route("GET", r"/api/customers/(\d+)", ("crm",))
+def customer_detail(conn, user, params, data, query):
+    customer = get_customer(conn, params[0])
+    customer["debts"] = debts_query(conn, "AND d.customer_id = ?", (params[0],))
+    customer["payments"] = rows(conn.execute(
+        """SELECT p.*, u.full_name AS user_name FROM debt_payments p LEFT JOIN users u ON u.id = p.created_by
+           WHERE p.customer_id = ? ORDER BY p.id DESC""", (params[0],)))
+    customer["total_debt"] = sum(d["amount"] for d in customer["debts"])
+    customer["total_paid"] = sum(d["paid"] for d in customer["debts"])
+    customer["remaining"] = customer["total_debt"] - customer["total_paid"]
+    return customer
+
+
+@route("POST", r"/api/customers/(\d+)/debts", ("crm",))
+def add_debt(conn, user, params, data, query):
+    customer = get_customer(conn, params[0])
+    amount = to_int(data.get("amount"), "amount", 1)
+    cur = conn.execute(
+        """INSERT INTO debts (customer_id, amount, due_date, comment, created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (customer["id"], amount, parse_due_date(data.get("due_date")),
+         (data.get("comment") or "").strip() or None, now(), user["id"]),
+    )
+    return {"id": cur.lastrowid}
+
+
+@route("GET", "/api/debts", ("crm",))
+def list_debts(conn, user, params, data, query):
+    debts = [d for d in debts_query(conn) if d["bucket"] != "closed"]
+    return {
+        "debts": debts,
+        "due_soon_days": DUE_SOON_DAYS,
+        "totals": {b: sum(d["remaining"] for d in debts if d["bucket"] == b) for b in ("overdue", "due", "later")},
+    }
+
+
+@route("POST", r"/api/debts/(\d+)/pay", ("crm",))
+def pay_debt(conn, user, params, data, query):
+    debt = conn.execute("SELECT * FROM debts WHERE id = ? AND status != 'cancelled'", (params[0],)).fetchone()
+    if not debt:
+        raise ApiError(404, "Qarz topilmadi")
+    method = data.get("method")
+    if method not in DEBT_PAY_METHODS:
+        raise ApiError(400, "To'lov usulini tanlang")
+    remaining = debt["amount"] - debt_paid(conn, debt["id"])
+    if remaining <= 0:
+        raise ApiError(409, "Bu qarz to'liq to'langan")
+    amount = to_int(data.get("amount") or remaining, "amount", 1)
+    if amount > remaining:
+        raise ApiError(400, f"Qarz qoldig'i {remaining:,} so'm - undan ko'p to'lab bo'lmaydi".replace(",", " "))
+    conn.execute(
+        """INSERT INTO debt_payments (debt_id, customer_id, amount, method, account, created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (debt["id"], debt["customer_id"], amount, method, DEBT_PAY_METHODS[method], now(), user["id"]),
+    )
+    if amount == remaining:
+        conn.execute("UPDATE debts SET status = 'closed' WHERE id = ?", (debt["id"],))
+    return {"ok": True, "remaining": remaining - amount, "account": DEBT_PAY_METHODS[method]}
+
+
+@route("POST", r"/api/debt-payments/(\d+)/cancel", ("crm", "finance"))
+def cancel_debt_payment(conn, user, params, data, query):
+    payment = conn.execute("SELECT * FROM debt_payments WHERE id = ?", (params[0],)).fetchone()
+    if not payment:
+        raise ApiError(404, "To'lov topilmadi")
+    if payment["status"] != "done":
+        raise ApiError(409, "To'lov allaqachon bekor qilingan")
+    conn.execute(
+        """UPDATE debt_payments SET status = 'cancelled', cancelled_at = ?, cancelled_by = ?, cancel_reason = ?
+           WHERE id = ?""",
+        (now(), user["id"], (data.get("reason") or "").strip() or None, params[0]),
+    )
+    # to'lov bekor bo'ldi - qarz yana ochiq
+    conn.execute("UPDATE debts SET status = 'open' WHERE id = ? AND status = 'closed'", (payment["debt_id"],))
+    return {"ok": True}
+
+
 # --- moliya: kassa balansi, kirim/chiqim, tranzaksiya turlari
 
 
@@ -1051,7 +1283,7 @@ def create_finance_type(conn, user, params, data, query):
 
 
 def finance_balance(conn):
-    accounts = {m: {"account": m, "sales": 0, "in": 0, "out": 0} for m in PAYMENT_METHODS}
+    accounts = {m: {"account": m, "sales": 0, "debt": 0, "in": 0, "out": 0} for m in FINANCE_ACCOUNTS}
     for method, total in conn.execute(
         "SELECT payment_method, COALESCE(SUM(total), 0) FROM orders WHERE status = 'paid' GROUP BY payment_method"
     ):
@@ -1063,8 +1295,13 @@ def finance_balance(conn):
     ):
         if account in accounts:
             accounts[account][direction] = total
+    for account, total in conn.execute(
+        "SELECT account, COALESCE(SUM(amount), 0) FROM debt_payments WHERE status = 'done' GROUP BY account"
+    ):
+        if account in accounts:
+            accounts[account]["debt"] = total
     for a in accounts.values():
-        a["balance"] = a["sales"] + a["in"] - a["out"]
+        a["balance"] = a["sales"] + a["debt"] + a["in"] - a["out"]
     result = list(accounts.values())
     return {"accounts": result, "total": sum(a["balance"] for a in result)}
 
@@ -1080,7 +1317,7 @@ def create_finance_entry(conn, user, params, data, query):
     ftype = conn.execute("SELECT * FROM finance_types WHERE id = ?", (data["type_id"],)).fetchone()
     if not ftype:
         raise ApiError(404, "Tranzaksiya turi topilmadi")
-    if data["account"] not in PAYMENT_METHODS:
+    if data["account"] not in FINANCE_ACCOUNTS:
         raise ApiError(400, "Hisobni tanlang (naqd, karta...)")
     amount = to_int(data["amount"], "amount", 1)
     cur = conn.execute(
@@ -1116,6 +1353,11 @@ def cancel_sale(conn, user, params, data, query):
         raise ApiError(404, "Buyurtma topilmadi")
     if order["status"] != "paid":
         raise ApiError(409, "Bu savdo allaqachon bekor qilingan")
+    debt = conn.execute("SELECT * FROM debts WHERE order_id = ? AND status != 'cancelled'", (params[0],)).fetchone()
+    if debt:  # qarzga sotilgan bo'lsa - qarz ham bekor bo'ladi
+        if debt_paid(conn, debt["id"]) > 0:
+            raise ApiError(409, "Bu qarz bo'yicha to'lovlar bor. Avval ularni bekor qiling")
+        conn.execute("UPDATE debts SET status = 'cancelled' WHERE id = ?", (debt["id"],))
     conn.execute(
         "UPDATE orders SET status = 'refunded', refunded_at = ?, refunded_by = ?, refund_reason = ? WHERE id = ?",
         (now(), user["id"], (data.get("reason") or "").strip() or None, params[0]),
@@ -1158,7 +1400,18 @@ def list_finance_entries(conn, user, params, data, query):
                FROM orders o
                LEFT JOIN users u ON u.id = o.cashier_id
                LEFT JOIN users ru ON ru.id = o.refunded_by
-               WHERE o.status IN ('paid', 'refunded') AND o.closed_at BETWEEN ? AND ?""", rng)]
+               WHERE o.status IN ('paid', 'refunded') AND o.payment_method != 'debt'
+                 AND o.closed_at BETWEEN ? AND ?""", rng)]
+    if source in ("all", "debts") and direction in ("", "in"):
+        entries += [dict(r, source="debt", direction="in", type_name="Qarz to'lovi") for r in conn.execute(
+            """SELECT p.id, p.account, p.amount, p.created_at, p.status, p.cancelled_at, p.cancel_reason,
+                      c.name || ' · ' || c.phone AS comment, u.full_name AS user_name,
+                      cu.full_name AS cancelled_by_name, p.method
+               FROM debt_payments p
+               JOIN customers c ON c.id = p.customer_id
+               LEFT JOIN users u ON u.id = p.created_by
+               LEFT JOIN users cu ON cu.id = p.cancelled_by
+               WHERE p.created_at BETWEEN ? AND ?""", rng)]
     if direction:
         entries = [e for e in entries if e["direction"] == direction]
     if account:

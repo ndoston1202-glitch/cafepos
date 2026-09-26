@@ -9,7 +9,7 @@ const PRINTER_KINDS = {
   network: "Tarmoq termoprinteri (IP manzil)",
   windows: "Ulashilgan printer (eski)",
 };
-const METHOD_NAMES = { cash: "Naqd", card: "Karta", payme: "Payme", click: "Click" };
+const METHOD_NAMES = { cash: "Naqd", card: "Karta", payme: "Payme", click: "Click", debt: "Qarzga" };
 
 // ------------------------------------------------------------ yordamchilar
 
@@ -313,6 +313,12 @@ const ICONS = {
   check: '<path d="M20 6 9 17l-5-5"/>',
   finance: '<circle cx="12" cy="12" r="9"/><path d="M15 9.5c-.5-1-1.6-1.5-3-1.5-1.7 0-3 .9-3 2s1.3 1.8 3 2 3 .9 3 2-1.3 2-3 2c-1.4 0-2.5-.5-3-1.5M12 6v2M12 16v2"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  crm: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/>',
+  debt: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M9 14h6M9 18h4"/>',
+  bank: '<path d="M3 21h18M4 10h16M5 10v8M9.5 10v8M14.5 10v8M19 10v8M12 3 3 8h18Z"/>',
+  terminal: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M8 6h8v4H8zM8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"/>',
+  transfer: '<path d="M4 7h14l-3-3M20 17H6l3 3"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   in: '<path d="M12 5v14M5 12l7 7 7-7"/>',
   out: '<path d="M12 19V5M5 12l7-7 7 7"/>',
@@ -335,6 +341,10 @@ const NAV = [
   ] },
   { perm: "users", href: "#/users", icon: "users", name: "Sotuvchilar" },
   { perm: "menu", href: "#/menu", icon: "box", name: "Mahsulotlar" },
+  { id: "crm", icon: "crm", name: "CRM", children: [
+    { perm: "crm", href: "#/crm/customers", icon: "users", name: "Mijozlar" },
+    { perm: "crm", href: "#/crm/debts", icon: "debt", name: "Mijozlar qarzi" },
+  ] },
   { perm: "reports", href: "#/reports", icon: "reports", name: "Hisobotlar" },
   { id: "finance", icon: "finance", name: "Moliya", children: [
     { perm: "finance", href: "#/finance", icon: "cashier", name: "Kassa" },
@@ -728,6 +738,7 @@ async function viewOrder(id) {
 
 function payModal(order, onPaid) {
   let method = "cash";
+  let customer = null;
   openModal(`
     <h2>To'lov · #${order.id}</h2>
     <div class="pay-methods">
@@ -736,6 +747,11 @@ function payModal(order, onPaid) {
     </div>
     <label><span>Chegirma (so'm)</span><input id="discount" type="number" min="0" value="0"></label>
     <div class="totals"><div class="grand"><span>To'lanadi</span><span id="to-pay"></span></div></div>
+    <div id="debt-box" class="hidden">
+      <span class="field-label">Mijoz (qarzga yoziladi)</span>
+      <div id="customer-picker"></div>
+      <label><span>To'lov muddati</span><input id="due-date" type="date" value="${dateAfter(7)}"></label>
+    </div>
     <label id="cash-box"><span>Mijoz bergan pul</span><input id="given" type="number" min="0" placeholder="Qaytim hisoblash uchun"></label>
     <div class="change" id="change"></div>
     <label><input type="checkbox" id="print-after" checked style="width:auto"> To'lovdan so'ng chek chiqarish</label>
@@ -747,6 +763,7 @@ function payModal(order, onPaid) {
     const update = () => {
       $("#to-pay", modal).textContent = money(total());
       $("#cash-box", modal).classList.toggle("hidden", method !== "cash");
+      $("#debt-box", modal).classList.toggle("hidden", method !== "debt");
       const given = +$("#given", modal).value || 0;
       $("#change", modal).textContent = method === "cash" && given
         ? (given >= total() ? "Qaytim: " + money(given - total()) : "Yetmaydi: " + money(total() - given))
@@ -759,10 +776,15 @@ function payModal(order, onPaid) {
     }));
     $("#discount", modal).addEventListener("input", update);
     $("#given", modal).addEventListener("input", update);
+    customerPicker($("#customer-picker", modal), (c) => { customer = c; });
     $("#confirm-pay", modal).addEventListener("click", safe(async () => {
-      const paid = await api("POST", `/api/orders/${order.id}/pay`, {
-        method, discount: +$("#discount", modal).value || 0,
-      });
+      const body = { method, discount: +$("#discount", modal).value || 0 };
+      if (method === "debt") {
+        if (!customer) throw new Error("Qarzga yozish uchun mijozni tanlang");
+        body.customer_id = customer.id;
+        body.due_date = $("#due-date", modal).value;
+      }
+      const paid = await api("POST", `/api/orders/${order.id}/pay`, body);
       const shouldPrint = $("#print-after", modal).checked;
       closeModal();
       toast("To'lov qabul qilindi ✅");
@@ -973,9 +995,297 @@ async function viewDashboard() {
   await render();
 }
 
+// ------------------------------------------------------------ CRM: mijozlar va qarzlar
+
+const GENDERS = { m: "Erkak", f: "Ayol" };
+const DEBT_METHODS = [
+  ["cash", "Naqd", "cash", "Naqd kassaga"],
+  ["click", "Click", "phone", "Kartaga"],
+  ["terminal", "Terminal", "terminal", "Hisob raqamga"],
+  ["transfer", "Pul ko'chirish", "transfer", "Hisob raqamga"],
+];
+
+function dateAfter(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+function formatPhone(p) {
+  const m = /^\+998(\d{2})(\d{3})(\d{2})(\d{2})$/.exec(p || "");
+  return m ? `+998 ${m[1]} ${m[2]} ${m[3]} ${m[4]}` : (p || "");
+}
+
+function dueText(d) {
+  if (d.days < 0) return `${-d.days} kun o'tdi`;
+  if (d.days === 0) return "bugun";
+  return `${d.days} kun qoldi`;
+}
+
+// Mijozni qidirib tanlash yoki shu yerning o'zida yangi mijoz yaratish
+function customerPicker(root, onSelect) {
+  root.innerHTML = `
+    <div class="picker">
+      <div class="picker-search">${icon("search")}<input placeholder="Ism yoki telefon bo'yicha qidirish" autocomplete="off"></div>
+      <div class="picker-selected hidden"></div>
+      <div class="picker-results"></div>
+      <button type="button" class="btn small picker-new">+ Yangi mijoz</button>
+      <div class="picker-form hidden">
+        <input name="p-name" placeholder="Ismi">
+        <input name="p-phone" type="tel" placeholder="+998 90 123 45 67">
+        <div class="gender-pick">${Object.entries(GENDERS).map(([k, v], i) =>
+          `<label><input type="radio" name="p-gender" value="${k}" ${i ? "" : "checked"}><span>${v}</span></label>`).join("")}</div>
+        <button type="button" class="btn primary small picker-save">Saqlash va tanlash</button>
+      </div>
+    </div>`;
+  const input = $(".picker-search input", root);
+  const results = $(".picker-results", root);
+  const selected = $(".picker-selected", root);
+  const choose = (c) => {
+    onSelect(c);
+    selected.innerHTML = `<b>${esc(c.name)}</b> · ${esc(formatPhone(c.phone))}
+      <button type="button" class="icon-btn" title="Boshqasini tanlash">✕</button>`;
+    selected.classList.remove("hidden");
+    results.innerHTML = "";
+    $(".picker-search", root).classList.add("hidden");
+    $(".picker-form", root).classList.add("hidden");
+    $(".picker-new", root).classList.add("hidden");
+    $("button", selected).addEventListener("click", () => {
+      onSelect(null);
+      selected.classList.add("hidden");
+      $(".picker-search", root).classList.remove("hidden");
+      $(".picker-new", root).classList.remove("hidden");
+      input.focus();
+    });
+  };
+  let timer;
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(safe(async () => {
+      const q = input.value.trim();
+      if (!q) { results.innerHTML = ""; return; }
+      const list = await api("GET", "/api/customers?q=" + encodeURIComponent(q));
+      results.innerHTML = list.slice(0, 6).map((c) => `
+        <button type="button" data-id="${c.id}"><b>${esc(c.name)}</b><span>${esc(formatPhone(c.phone))}</span>
+          ${c.debt > 0 ? `<em>qarz ${money(c.debt)}</em>` : ""}</button>`).join("") || `<p class="muted">Topilmadi</p>`;
+      $$("[data-id]", results).forEach((b) => b.addEventListener("click", () => choose(list.find((c) => c.id === +b.dataset.id))));
+    }), 250);
+  });
+  $(".picker-new", root).addEventListener("click", () => $(".picker-form", root).classList.toggle("hidden"));
+  $(".picker-save", root).addEventListener("click", safe(async () => {
+    const c = await api("POST", "/api/customers", {
+      name: $("[name=p-name]", root).value, phone: $("[name=p-phone]", root).value,
+      gender: $("[name=p-gender]:checked", root).value,
+    });
+    toast("Mijoz qo'shildi");
+    choose(c);
+  }));
+}
+
+function customerForm(c, onSaved) {
+  const isNew = !c;
+  c = c || { gender: "m" };
+  return `
+    <form class="panel customer-form" id="customer-form">
+      <h2>${isNew ? "Yangi mijoz" : "Ma'lumotlarni tahrirlash"}</h2>
+      <label><span>Telefon raqami *</span><input name="phone" type="tel" required value="${esc(formatPhone(c.phone))}" placeholder="+998 90 123 45 67"></label>
+      <label><span>Ismi *</span><input name="name" required value="${esc(c.name || "")}" placeholder="Masalan: Ali Valiyev"></label>
+      <span class="field-label">Jinsi *</span>
+      <div class="gender-pick">${Object.entries(GENDERS).map(([k, v]) =>
+        `<label><input type="radio" name="gender" value="${k}" ${c.gender === k ? "checked" : ""}><span>${v}</span></label>`).join("")}</div>
+      <div class="actions">${isNew ? "" : `<button type="button" class="btn" id="form-cancel">Bekor</button>`}
+        <button class="btn primary">${isNew ? "Mijozni yaratish" : "Saqlash"}</button></div>
+    </form>`;
+}
+
+async function viewCustomers() {
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const selectedId = +params.get("id") || null;
+  const mode = params.get("mode");  // new / edit
+  const q = params.get("q") || "";
+  const [list, detail] = await Promise.all([
+    api("GET", "/api/customers" + (q ? "?q=" + encodeURIComponent(q) : "")),
+    selectedId ? api("GET", "/api/customers/" + selectedId) : Promise.resolve(null),
+  ]);
+  const open = (id, extra = "") => go(`#/crm/customers?id=${id}${extra}${q ? "&q=" + encodeURIComponent(q) : ""}`);
+
+  let right;
+  if (mode === "new" || (!detail && !list.length)) {
+    right = customerForm(null);
+  } else if (detail && mode === "edit") {
+    right = customerForm(detail);
+  } else if (detail) {
+    const d = detail;
+    right = `
+      <div class="panel customer-card">
+        <div class="customer-head">
+          <div class="avatar big gender-${d.gender}">${esc(d.name[0] || "?").toUpperCase()}</div>
+          <div><h2>${esc(d.name)}</h2>
+            <div class="muted">${esc(formatPhone(d.phone))} · ${GENDERS[d.gender]} · ${esc(d.created_at.slice(0, 10))} dan mijoz</div></div>
+          <button class="btn small" id="edit-customer">✏️ Tahrirlash</button>
+        </div>
+        <div class="debt-summary">
+          <div><span class="muted">Jami qarz</span><b>${money(d.total_debt)}</b></div>
+          <div><span class="muted">To'langan</span><b class="amount-in">${money(d.total_paid)}</b></div>
+          <div><span class="muted">Qoldiq</span><b class="${d.remaining > 0 ? "amount-out" : ""}">${money(d.remaining)}</b></div>
+        </div>
+        <div class="toolbar"><h3 style="margin:0;flex:1">Qarzlar</h3>
+          <button class="btn small primary" id="add-debt">+ Qarz qo'shish</button></div>
+        ${d.debts.length ? `<table class="list">
+          <thead><tr><th>Sana</th><th>Izoh</th><th>Muddat</th><th class="right">Summa</th><th class="right">Qoldiq</th><th></th></tr></thead>
+          <tbody>${d.debts.map((x) => `
+            <tr><td class="nowrap">${esc(x.created_at.slice(0, 10))}</td><td class="muted">${esc(x.comment || "")}</td>
+              <td class="nowrap"><span class="due-badge due-${x.bucket}">${esc(x.due_date)} · ${x.bucket === "closed" ? "yopilgan" : dueText(x)}</span></td>
+              <td class="right">${money(x.amount)}</td><td class="right"><b>${money(x.remaining)}</b></td>
+              <td class="right">${x.remaining > 0 ? `<button class="btn small primary" data-pay="${x.id}">To'lash</button>` : ""}</td></tr>`).join("")}
+          </tbody></table>` : `<p class="muted">Qarzi yo'q</p>`}
+        ${d.payments.length ? `<h3>To'lovlar tarixi</h3>
+          <table class="list finance-table"><tbody>${d.payments.map((p) => `
+            <tr class="${p.status === "cancelled" ? "cancelled" : ""}"><td class="nowrap">${esc(p.created_at.slice(0, 16))}</td>
+              <td>${(DEBT_METHODS.find((m) => m[0] === p.method) || [0, p.method])[1]} → ${accountName(p.account)}</td>
+              <td class="muted">${esc(p.user_name || "")}</td>
+              <td class="right">${signedMoney("in", p.amount)}</td>
+              <td>${p.status === "cancelled" ? `<span class="badge off">Bekor qilingan</span>` : `<span class="badge ok">Bajarildi</span>`}</td></tr>`).join("")}
+          </tbody></table>` : ""}
+      </div>`;
+  } else {
+    right = `<div class="panel empty-state">${icon("crm")}<p>Ma'lumotlarini ko'rish uchun chapdan mijozni tanlang</p>
+      <button class="btn primary" id="new-customer-2">+ Yangi mijoz</button></div>`;
+  }
+
+  const view = layout(`
+    <div class="crm-layout">
+      <div class="panel customer-list">
+        <div class="toolbar"><h2 style="flex:1">Mijozlar</h2><button class="btn primary small" id="new-customer">+ Yangi</button></div>
+        <form id="search" class="picker-search">${icon("search")}<input name="q" value="${esc(q)}" placeholder="Ism yoki telefon"></form>
+        <div class="customer-items">
+          ${list.map((c) => `
+            <button class="customer-item ${c.id === selectedId ? "active" : ""}" data-id="${c.id}">
+              <span class="avatar gender-${c.gender}">${esc(c.name[0] || "?").toUpperCase()}</span>
+              <span class="ci-body"><b>${esc(c.name)}</b><small>${esc(formatPhone(c.phone))}</small></span>
+              ${c.debt > 0 ? `<em class="amount-out">${money(c.debt)}</em>` : ""}
+            </button>`).join("") || `<p class="muted">Mijozlar yo'q</p>`}
+        </div>
+        <p class="muted small-note">Jami: ${list.length} ta mijoz</p>
+      </div>
+      <div class="customer-detail">${right}</div>
+    </div>`);
+
+  $$(".customer-item", view).forEach((b) => b.addEventListener("click", () => open(b.dataset.id)));
+  $("#search", view).addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = e.target.q.value.trim();
+    go("#/crm/customers" + (v ? "?q=" + encodeURIComponent(v) : ""));
+  });
+  const newBtn = () => go("#/crm/customers?mode=new" + (q ? "&q=" + encodeURIComponent(q) : ""));
+  $("#new-customer", view).addEventListener("click", newBtn);
+  const n2 = $("#new-customer-2", view);
+  if (n2) n2.addEventListener("click", newBtn);
+  const form = $("#customer-form", view);
+  if (form) {
+    const cancel = $("#form-cancel", view);
+    if (cancel) cancel.addEventListener("click", () => open(selectedId));
+    form.addEventListener("submit", safe(async (e) => {
+      e.preventDefault();
+      const data = formData(e.target);
+      const saved = mode === "edit" && detail
+        ? await api("PUT", "/api/customers/" + detail.id, data)
+        : await api("POST", "/api/customers", data);
+      toast("Saqlandi ✅");
+      open(saved.id);
+    }));
+  }
+  if (detail && mode !== "edit") {
+    $("#edit-customer", view).addEventListener("click", () => open(detail.id, "&mode=edit"));
+    $("#add-debt", view).addEventListener("click", () => addDebtModal(detail, () => router()));
+    $$("[data-pay]", view).forEach((b) => b.addEventListener("click", () =>
+      payDebtModal(detail.debts.find((x) => x.id === +b.dataset.pay), detail, () => router())));
+  }
+}
+
+function addDebtModal(customer, onSaved) {
+  openModal(`
+    <form id="f">
+      <div class="modal-head"><h2>Qarz qo'shish · ${esc(customer.name)}</h2>
+        <button type="button" class="icon-btn" data-close>✕</button></div>
+      <label><span>Summa (so'm)</span><input name="amount" type="number" min="1" required></label>
+      <label><span>To'lov muddati</span><input name="due_date" type="date" required value="${dateAfter(7)}"></label>
+      <label><span>Izoh <i>(ixtiyoriy)</i></span><input name="comment" maxlength="200"></label>
+      <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">Saqlash</button></div>
+    </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
+    e.preventDefault();
+    await api("POST", `/api/customers/${customer.id}/debts`, formData(e.target));
+    closeModal();
+    toast("Qarz qo'shildi");
+    onSaved();
+  })));
+}
+
+function payDebtModal(debt, customer, onPaid) {
+  const name = customer ? customer.name : debt.customer_name;
+  let method = "cash";
+  openModal(`
+    <form id="f">
+      <div class="modal-head"><h2>Qarzni to'lash · ${esc(name)}</h2>
+        <button type="button" class="icon-btn" data-close>✕</button></div>
+      <p class="muted">Qarz: ${money(debt.amount)} · to'langan: ${money(debt.paid)} ·
+        <b>qoldiq: ${money(debt.remaining)}</b> · muddat ${esc(debt.due_date)} (${dueText(debt)})</p>
+      <span class="field-label">To'lov usuli</span>
+      <div class="pay4">${DEBT_METHODS.map(([k, v, ic, to]) => `
+        <button type="button" class="pay4-btn ${k === method ? "active" : ""}" data-m="${k}">
+          ${icon(ic)}<b>${v}</b><small>→ ${to}</small></button>`).join("")}</div>
+      <label><span>Summa (so'm)</span><input name="amount" type="number" min="1" max="${debt.remaining}" value="${debt.remaining}" required></label>
+      <div class="actions"><button type="button" class="btn" data-close>Bekor</button><button class="btn primary">To'lash</button></div>
+    </form>`, (m) => {
+    $$("[data-m]", m).forEach((b) => b.addEventListener("click", () => {
+      method = b.dataset.m;
+      $$("[data-m]", m).forEach((x) => x.classList.toggle("active", x === b));
+    }));
+    $("#f", m).addEventListener("submit", safe(async (e) => {
+      e.preventDefault();
+      const res = await api("POST", `/api/debts/${debt.id}/pay`, { method, amount: e.target.amount.value });
+      closeModal();
+      toast(`To'lov qabul qilindi → ${accountName(res.account)}` + (res.remaining ? ` · qoldiq ${money(res.remaining)}` : " · qarz yopildi ✅"));
+      onPaid();
+    }));
+  });
+}
+
+async function viewDebts() {
+  const data = await api("GET", "/api/debts");
+  const columns = [
+    ["overdue", "Muddati o'tgan", "To'lov vaqti o'tib ketgan"],
+    ["due", "To'lov vaqti keldi", `Bugun va ${data.due_soon_days} kun ichida`],
+    ["later", "Muddati bor", `${data.due_soon_days} kundan keyin`],
+  ];
+  const view = layout(`
+    <div class="toolbar"><h2>Mijozlar qarzi</h2></div>
+    <div class="debt-board">
+      ${columns.map(([k, title, sub]) => {
+        const items = data.debts.filter((d) => d.bucket === k);
+        return `
+          <section class="debt-col col-${k}">
+            <header><div><b>${title}</b><small>${sub}</small></div>
+              <div class="right"><b>${money(data.totals[k])}</b><small>${items.length} ta</small></div></header>
+            ${items.map((d) => `
+              <article class="debt-card">
+                <div class="dc-top"><b>${esc(d.customer_name)}</b><span class="due-badge due-${d.bucket}">${dueText(d)}</span></div>
+                <div class="muted">${esc(formatPhone(d.customer_phone))}${d.comment ? " · " + esc(d.comment) : ""}</div>
+                <div class="dc-bottom"><div><small class="muted">Muddat: ${esc(d.due_date)}</small>
+                  <div class="dc-amount">${money(d.remaining)}${d.paid ? `<small class="muted"> / ${money(d.amount)}</small>` : ""}</div></div>
+                  <div class="dc-actions"><a class="btn small" href="#/crm/customers?id=${d.customer_id}">Mijoz</a>
+                    <button class="btn small primary" data-pay="${d.id}">To'lash</button></div></div>
+              </article>`).join("") || `<p class="muted empty-col">Yo'q</p>`}
+          </section>`;
+      }).join("")}
+    </div>`);
+  $$("[data-pay]", view).forEach((b) => b.addEventListener("click", () =>
+    payDebtModal(data.debts.find((d) => d.id === +b.dataset.pay), null, () => viewDebts())));
+}
+
 // ------------------------------------------------------------ moliya
 
-const ACCOUNTS = [["cash", "Naqd", "cash"], ["card", "Karta", "card"], ["payme", "Payme", "phone"], ["click", "Click", "phone"]];
+const ACCOUNTS = [["cash", "Naqd", "cash"], ["card", "Karta", "card"], ["payme", "Payme", "phone"], ["click", "Click", "phone"],
+  ["bank", "Hisob raqam", "bank"]];
 const DIRECTION_NAMES = { in: "Kirim", out: "Chiqim" };
 const accountName = (a) => (ACCOUNTS.find((x) => x[0] === a) || [a, a])[1];
 
@@ -1036,7 +1346,8 @@ function entriesTable(entries, withCancel) {
           <tr class="${e.status === "cancelled" ? "cancelled" : ""}">
             <td class="nowrap">${esc(e.created_at.slice(0, 16))}</td>
             <td><span class="dir-dot dir-${e.direction}">${icon(e.direction)}</span>${esc(e.type_name)}
-              ${e.source === "sale" ? `<span class="badge">avtomatik</span>` : ""}</td>
+              ${e.source === "sale" ? `<span class="badge">avtomatik</span>` : ""}
+              ${e.source === "debt" ? `<span class="badge">CRM</span>` : ""}</td>
             <td>${accountName(e.account)}</td>
             <td class="muted">${esc(e.comment || "")}</td>
             <td class="muted">${esc(e.user_name || "")}</td>
@@ -1062,7 +1373,10 @@ function bindCancel(root, onDone) {
       (sale ? `Buyurtma #${b.dataset.cancel} savdosi bekor qilinadi (pul qaytarildi).\n` : "Tranzaksiya bekor qilinadi.\n") +
       `${effect}. Yozuv o'chirilmaydi, tarixda qoladi.\n\nSababini yozing:`);
     if (reason === null) return;
-    await api("POST", sale ? `/api/finance/sales/${b.dataset.cancel}/cancel` : `/api/finance/entries/${b.dataset.cancel}/cancel`, { reason });
+    const url = sale ? `/api/finance/sales/${b.dataset.cancel}/cancel`
+      : b.dataset.source === "debt" ? `/api/debt-payments/${b.dataset.cancel}/cancel`
+        : `/api/finance/entries/${b.dataset.cancel}/cancel`;
+    await api("POST", url, { reason });
     toast(`Bekor qilindi: ${effect}`);
     onDone();
   })));
@@ -1089,6 +1403,7 @@ async function viewFinanceCash() {
           <div class="kpi-value ${a.balance < 0 ? "negative" : ""}">${money(a.balance)}</div>
           <div class="kpi-breakdown">
             <span>Savdo</span><b>${money(a.sales)}</b>
+            <span>Qarz to'lovi</span><b class="amount-in">+${money(a.debt)}</b>
             <span>Kirim</span><b class="amount-in">+${money(a.in)}</b>
             <span>Chiqim</span><b class="amount-out">−${money(a.out)}</b>
           </div>
@@ -1119,7 +1434,7 @@ async function viewFinanceEntries() {
       <input type="date" name="to" value="${d.to}" style="width:auto">
       ${sel("direction", [["", "Kirim va chiqim"], ["in", "Faqat kirim"], ["out", "Faqat chiqim"]], params.get("direction"))}
       ${sel("account", [["", "Barcha hisoblar"], ...ACCOUNTS.map(([k, v]) => [k, v])], params.get("account"))}
-      ${sel("source", [["all", "Savdo va qo'lda"], ["manual", "Faqat qo'lda kiritilgan"], ["sales", "Faqat savdo"]], params.get("source") || "all")}
+      ${sel("source", [["all", "Hammasi"], ["manual", "Faqat qo'lda kiritilgan"], ["sales", "Faqat savdo"], ["debts", "Faqat qarz to'lovlari"]], params.get("source") || "all")}
       <button class="btn primary">Ko'rsatish</button>
     </form>
     <div class="finance-totals">
@@ -1497,6 +1812,7 @@ const PERMISSION_LIST = [
   ["kitchen", "kitchen", "Oshxona ekrani"],
   ["reports", "reports", "Hisobot"],
   ["menu", "menu", "Menyu"],
+  ["crm", "crm", "CRM (mijozlar, qarzlar)"],
   ["finance", "finance", "Moliya (kassa, kirim-chiqim)"],
   ["halls", "halls", "Zallar va stollar"],
   ["printers", "printer", "Printerlar"],
@@ -1505,7 +1821,7 @@ const PERMISSION_LIST = [
 ];
 const ROLE_DEFAULTS = {
   admin: PERMISSION_LIST.map(([k]) => k),
-  cashier: ["tables", "cashier", "kitchen", "reports"],
+  cashier: ["tables", "cashier", "kitchen", "reports", "crm"],
   waiter: ["tables"],
   cook: ["kitchen"],
 };
@@ -1942,6 +2258,8 @@ async function viewSettings() {
 
 const routes = [
   [/^#\/dashboard$/, viewDashboard, ["reports"]],
+  [/^#\/crm\/customers$/, viewCustomers, ["crm"]],
+  [/^#\/crm\/debts$/, viewDebts, ["crm"]],
   [/^#\/finance$/, viewFinanceCash, ["finance"]],
   [/^#\/finance\/entries$/, viewFinanceEntries, ["finance"]],
   [/^#\/finance\/types$/, viewFinanceTypes, ["finance"]],

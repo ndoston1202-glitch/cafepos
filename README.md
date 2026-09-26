@@ -34,6 +34,9 @@ Linux/macOS: `python3 desktop.py` (yoki faqat server: `python3 server.py`)
 - 🪑 **Stollar** — bo'sh/band holati, joriy summa; bosilganda buyurtma ochiladi
 - 🥡 **Olib ketish** buyurtmalari
 - 🧾 **Buyurtma** — kategoriya bo'yicha menyu, miqdorni +/− bilan o'zgartirish
+- 👥 **CRM** — Mijozlar (telefon, ism, jins; qarzlar va to'lovlar tarixi) va Mijozlar qarzi
+  (Muddati o'tgan / To'lov vaqti keldi / Muddati bor). Buyurtmani "Qarzga" to'lash mumkin.
+  Qarz to'lovi: Naqd → naqd kassa, Click → karta, Terminal va Pul ko'chirish → hisob raqam
 - 💵 **Moliya** — Kassa (Naqd/Karta/Payme/Click balansi), kirim-chiqim, tranzaksiyalar tarixi,
   tranzaksiya turlari (takrorlanmaydi, o'zgartirilmaydi; bajarilgani bekor qilinadi, o'chirilmaydi)
 - 🧾 **Xizmat haqi** — stolda o'tirganlarga foiz (⚙️ Sozlamalar); har bir zal uchun alohida foiz qo'yish mumkin
