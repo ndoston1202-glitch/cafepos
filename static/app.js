@@ -227,9 +227,6 @@ function showInstallHelp() {
 
 const PIN_LENGTH = 4;
 
-const WEEKDAY_NAMES = ["Yakshanba", "Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba"];
-const MONTH_NAMES = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"];
-
 function renderLogin() {
   $("#app").innerHTML = `
     <div class="auth">
@@ -240,7 +237,6 @@ function renderLogin() {
         <p>Stollar, buyurtmalar, oshxona va kassani yagona tizimda boshqaring</p>
       </section>
       <div class="pin-card" id="pin-card">
-        <div class="pin-clock"><b id="pin-time"></b><span id="pin-date"></span></div>
         <h2>Xush kelibsiz</h2>
         <p class="pin-sub">Parolingizni kiriting</p>
         <div class="pin-dots" id="pin-dots">${"<i></i>".repeat(PIN_LENGTH)}</div>
@@ -257,16 +253,17 @@ function renderLogin() {
       </div>
     </div>`;
   bindInstallButtons($("#app"));
-  const tick = () => {
-    const el = $("#pin-time");
-    if (!el) return clearInterval(state.clock);
-    const d = new Date();
-    el.textContent = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
-    $("#pin-date").textContent = `${WEEKDAY_NAMES[d.getDay()]}, ${d.getDate()}-${MONTH_NAMES[d.getMonth()]}`;
+  // Kompyuterda karta chap tarafdagi blok (logo ... pastki yozuv) balandligida va kvadrat
+  const fit = () => {
+    const card = $("#pin-card");
+    if (!card) return window.removeEventListener("resize", fit);
+    const hero = $(".auth-hero");
+    const size = window.innerWidth > 760 ? Math.max(hero.offsetHeight, 360) : 0;
+    card.style.width = card.style.height = size ? size + "px" : "";
   };
-  clearInterval(state.clock);
-  state.clock = setInterval(tick, 10000);
-  tick();
+  window.addEventListener("resize", fit);
+  $(".auth-hero-logo").addEventListener("load", fit);  // logo yuklangach blok balandligi o'zgaradi
+  fit();
 
   let pin = "";
   let busy = false;
@@ -285,7 +282,6 @@ function renderLogin() {
       state.user = await api("POST", "/api/login", { pin });
       await loadSettings();
       document.removeEventListener("keydown", state.pinKeys);
-      clearInterval(state.clock);
       if (!location.hash || location.hash === "#/") location.hash = defaultRoute();
       router();
     } catch (err) {
