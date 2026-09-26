@@ -38,7 +38,7 @@ SESSION_DAYS = 7
 
 ROLES = ("admin", "cashier", "waiter", "cook")
 # Bo'limlarga kirish ruxsatlari
-PERMISSIONS = ("tables", "cashier", "kitchen", "reports", "menu", "halls", "printers", "users", "settings")
+PERMISSIONS = ("tables", "cashier", "kitchen", "reports", "menu", "finance", "halls", "printers", "users", "settings")
 ROLE_DEFAULTS = {
     "admin": PERMISSIONS,
     "cashier": ("tables", "cashier", "kitchen", "reports"),
@@ -46,6 +46,7 @@ ROLE_DEFAULTS = {
     "cook": ("kitchen",),
 }
 PAYMENT_METHODS = ("cash", "card", "payme", "click")
+SYSTEM_FINANCE_TYPES = (("Mijoz balansini to'ldirish", "in"), ("Ta'minotchiga pul berish", "out"))
 PRINTER_KINDS = ("system", "network", "windows")  # windows = eski versiyadagi ulashilgan printer
 
 db_lock = threading.Lock()
@@ -137,6 +138,29 @@ CREATE TABLE IF NOT EXISTS kitchen_tickets (
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_status ON kitchen_tickets(status);
+CREATE TABLE IF NOT EXISTS finance_types (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    direction TEXT NOT NULL,           -- 'in' = kirim, 'out' = chiqim
+    is_system INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS finance_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type_id INTEGER NOT NULL REFERENCES finance_types(id),
+    direction TEXT NOT NULL,
+    account TEXT NOT NULL,             -- cash / card / payme / click
+    amount INTEGER NOT NULL,
+    comment TEXT,
+    status TEXT NOT NULL DEFAULT 'done',   -- done / cancelled (o'chirilmaydi)
+    created_at TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id),
+    cancelled_at TEXT,
+    cancelled_by INTEGER REFERENCES users(id),
+    cancel_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_finance_created ON finance_entries(created_at);
 """
 
 # Eski bazalarga yangi ustunlar qo'shiladi (ma'lumot o'chmaydi)
@@ -207,6 +231,13 @@ def init_db(conn):
                 )
         for i in range(1, 9):
             conn.execute("INSERT INTO tables (name, seats) VALUES (?, ?)", (f"Stol {i}", 4))
+    # Bazaviy tranzaksiya turlari doim bo'ladi
+    for name, direction in SYSTEM_FINANCE_TYPES:
+        conn.execute(
+            """INSERT OR IGNORE INTO finance_types (name, direction, is_system, created_at)
+               VALUES (?, ?, 1, ?)""",
+            (name, direction, now()),
+        )
     if conn.execute("SELECT COUNT(*) FROM halls").fetchone()[0] == 0:
         seed_halls(conn)
     conn.commit()
@@ -953,6 +984,142 @@ def kitchen_ready(conn, user, params, data, query):
         "UPDATE kitchen_tickets SET status = 'ready', ready_at = ? WHERE id = ?", (now(), params[0])
     )
     return {"ok": True}
+
+
+# --- moliya: kassa balansi, kirim/chiqim, tranzaksiya turlari
+
+
+def clean_name(text):
+    return " ".join((text or "").split())
+
+
+@route("GET", "/api/finance/types", ("finance",))
+def list_finance_types(conn, user, params, data, query):
+    return rows(conn.execute(
+        """SELECT t.*, u.full_name AS created_by_name,
+                  (SELECT COUNT(*) FROM finance_entries e WHERE e.type_id = t.id AND e.status = 'done') AS used
+           FROM finance_types t LEFT JOIN users u ON u.id = t.created_by
+           ORDER BY t.is_system DESC, t.direction, t.name"""
+    ))
+
+
+@route("POST", "/api/finance/types", ("finance",))
+def create_finance_type(conn, user, params, data, query):
+    name = clean_name(data.get("name"))
+    if len(name) < 2:
+        raise ApiError(400, "Tranzaksiya nomini kiriting")
+    if data.get("direction") not in ("in", "out"):
+        raise ApiError(400, "Kirim yoki chiqimni tanlang")
+    if conn.execute("SELECT 1 FROM finance_types WHERE name = ? COLLATE NOCASE", (name,)).fetchone():
+        raise ApiError(409, f"\"{name}\" nomli tranzaksiya allaqachon bor")
+    cur = conn.execute(
+        "INSERT INTO finance_types (name, direction, created_at, created_by) VALUES (?, ?, ?, ?)",
+        (name, data["direction"], now(), user["id"]),
+    )
+    return {"id": cur.lastrowid}
+# Yaratilgan tur o'zgartirilmaydi va o'chirilmaydi - PUT/DELETE yo'q
+
+
+def finance_balance(conn):
+    accounts = {m: {"account": m, "sales": 0, "in": 0, "out": 0} for m in PAYMENT_METHODS}
+    for method, total in conn.execute(
+        "SELECT payment_method, COALESCE(SUM(total), 0) FROM orders WHERE status = 'paid' GROUP BY payment_method"
+    ):
+        if method in accounts:
+            accounts[method]["sales"] = total
+    for account, direction, total in conn.execute(
+        """SELECT account, direction, COALESCE(SUM(amount), 0) FROM finance_entries
+           WHERE status = 'done' GROUP BY account, direction"""
+    ):
+        if account in accounts:
+            accounts[account][direction] = total
+    for a in accounts.values():
+        a["balance"] = a["sales"] + a["in"] - a["out"]
+    result = list(accounts.values())
+    return {"accounts": result, "total": sum(a["balance"] for a in result)}
+
+
+@route("GET", "/api/finance/balance", ("finance",))
+def get_finance_balance(conn, user, params, data, query):
+    return finance_balance(conn)
+
+
+@route("POST", "/api/finance/entries", ("finance",))
+def create_finance_entry(conn, user, params, data, query):
+    require(data, "type_id", "account", "amount")
+    ftype = conn.execute("SELECT * FROM finance_types WHERE id = ?", (data["type_id"],)).fetchone()
+    if not ftype:
+        raise ApiError(404, "Tranzaksiya turi topilmadi")
+    if data["account"] not in PAYMENT_METHODS:
+        raise ApiError(400, "Hisobni tanlang (naqd, karta...)")
+    amount = to_int(data["amount"], "amount", 1)
+    cur = conn.execute(
+        """INSERT INTO finance_entries (type_id, direction, account, amount, comment, created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (ftype["id"], ftype["direction"], data["account"], amount,
+         (data.get("comment") or "").strip() or None, now(), user["id"]),
+    )
+    return {"id": cur.lastrowid, "balance": finance_balance(conn)}
+
+
+@route("POST", r"/api/finance/entries/(\d+)/cancel", ("finance",))
+def cancel_finance_entry(conn, user, params, data, query):
+    entry = conn.execute("SELECT * FROM finance_entries WHERE id = ?", (params[0],)).fetchone()
+    if not entry:
+        raise ApiError(404, "Tranzaksiya topilmadi")
+    if entry["status"] != "done":
+        raise ApiError(409, "Tranzaksiya allaqachon bekor qilingan")
+    conn.execute(
+        """UPDATE finance_entries SET status = 'cancelled', cancelled_at = ?, cancelled_by = ?, cancel_reason = ?
+           WHERE id = ?""",
+        (now(), user["id"], (data.get("reason") or "").strip() or None, params[0]),
+    )
+    return {"ok": True}
+
+
+@route("GET", "/api/finance/entries", ("finance",))
+def list_finance_entries(conn, user, params, data, query):
+    today = datetime.now().date()
+    date_from = query.get("from", [str(today.replace(day=1))])[0]
+    date_to = query.get("to", [str(today)])[0]
+    for d in (date_from, date_to):
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+            raise ApiError(400, "Sana formati: YYYY-MM-DD")
+    rng = (date_from + " 00:00:00", date_to + " 23:59:59")
+    source = query.get("source", ["all"])[0]
+    direction = query.get("direction", [""])[0]
+    account = query.get("account", [""])[0]
+
+    entries = []
+    if source in ("all", "manual"):
+        entries += [dict(r, source="manual") for r in conn.execute(
+            """SELECT e.id, e.direction, e.account, e.amount, e.comment, e.status, e.created_at,
+                      e.cancelled_at, e.cancel_reason, t.name AS type_name,
+                      u.full_name AS user_name, cu.full_name AS cancelled_by_name
+               FROM finance_entries e
+               JOIN finance_types t ON t.id = e.type_id
+               LEFT JOIN users u ON u.id = e.created_by
+               LEFT JOIN users cu ON cu.id = e.cancelled_by
+               WHERE e.created_at BETWEEN ? AND ?""", rng)]
+    if source in ("all", "sales") and direction in ("", "in"):
+        # Savdo tushumlari - avtomatik kirim (buyurtmani bekor qilish Savdo bo'limida)
+        entries += [dict(r, source="sale", direction="in", status="done", type_name="Savdo") for r in conn.execute(
+            """SELECT o.id, o.payment_method AS account, o.total AS amount, o.closed_at AS created_at,
+                      'Buyurtma #' || o.id AS comment, u.full_name AS user_name
+               FROM orders o LEFT JOIN users u ON u.id = o.cashier_id
+               WHERE o.status = 'paid' AND o.closed_at BETWEEN ? AND ?""", rng)]
+    if direction:
+        entries = [e for e in entries if e["direction"] == direction]
+    if account:
+        entries = [e for e in entries if e["account"] == account]
+    entries.sort(key=lambda e: e["created_at"], reverse=True)
+    done = [e for e in entries if e["status"] == "done"]
+    return {
+        "from": date_from, "to": date_to,
+        "entries": entries[:1000],
+        "total_in": sum(e["amount"] for e in done if e["direction"] == "in"),
+        "total_out": sum(e["amount"] for e in done if e["direction"] == "out"),
+    }
 
 
 # --- bosh sahifa (savdo ko'rsatkichlari)

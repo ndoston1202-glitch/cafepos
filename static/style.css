@@ -732,6 +732,47 @@ tr.inactive td { opacity: .5; }
   .kpi-value { font-size: 20px; }
 }
 
+/* --- moliya */
+.finance-balances { grid-template-columns: repeat(5, 1fr); }
+.kpi-value.negative { color: var(--danger); }
+.finance-balances .kpi-value { font-size: 21px; white-space: nowrap; }
+.kpi-breakdown { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.kpi-breakdown b { text-align: right; font-weight: 600; white-space: nowrap; }
+.total-kpi { background: #1f1a17; border-color: #1f1a17; color: #fff; }
+.total-kpi .kpi-icon { background: rgba(208, 138, 76, .2); color: #e3a063; }
+.total-kpi .kpi-sub { color: #b9aea4; }
+.amount-in { color: #2e7d32; }
+.amount-out { color: var(--danger); }
+.dir-dot { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+.dir-dot .icon { width: 13px; height: 13px; }
+.dir-in { background: #e8f5e9; color: #2e7d32; }
+.dir-out { background: #fdecea; color: var(--danger); }
+.badge.ok { background: #e8f5e9; color: #2e7d32; }
+.finance-table tr.cancelled td { opacity: .55; }
+.finance-table tr.cancelled .amount-in, .finance-table tr.cancelled .amount-out { text-decoration: line-through; }
+.nowrap { white-space: nowrap; }
+.table-scroll { overflow-x: auto; }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.finance-totals { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.finance-totals div { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 16px; display: flex; flex-direction: column; min-width: 160px; }
+.finance-totals b { font-size: 18px; }
+.account-pick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 6px 0 12px; }
+.account-option { margin: 0; cursor: pointer; }
+.account-option input { position: absolute; opacity: 0; pointer-events: none; }
+.account-option > span {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  margin: 0; padding: 8px 4px;
+  border: 2px solid var(--line); border-radius: 10px;
+  color: var(--text); font-size: 13px; text-align: center;
+}
+.account-option .icon { width: 18px; height: 18px; color: var(--muted); }
+.account-option small { color: var(--muted); font-size: 11px; }
+.account-option input:checked + span { border-color: var(--primary); background: #fbf5ee; }
+.small-note { font-size: 13px; margin: 4px 0 0; }
+.btn .icon { width: 16px; height: 16px; vertical-align: -3px; }
+@media (max-width: 1100px) { .finance-balances { grid-template-columns: repeat(2, 1fr); } .finance-balances .total-kpi { grid-column: 1 / -1; } }
+@media (max-width: 600px) { .account-pick { grid-template-columns: repeat(2, 1fr); } }
+
 /* --- jadval */
 table.list { width: 100%; border-collapse: collapse; }
 table.list th, table.list td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; }

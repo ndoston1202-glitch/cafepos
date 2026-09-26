@@ -311,6 +311,11 @@ const ICONS = {
   cancel: '<circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  finance: '<circle cx="12" cy="12" r="9"/><path d="M15 9.5c-.5-1-1.6-1.5-3-1.5-1.7 0-3 .9-3 2s1.3 1.8 3 2 3 .9 3 2-1.3 2-3 2c-1.4 0-2.5-.5-3-1.5M12 6v2M12 16v2"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  in: '<path d="M12 5v14M5 12l7 7 7-7"/>',
+  out: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   collapse: '<path d="m11 17-5-5 5-5M18 17l-5-5 5-5"/>',
   expand: '<path d="m6 17 5-5-5-5M13 17l5-5-5-5"/>',
 };
@@ -331,6 +336,11 @@ const NAV = [
   { perm: "users", href: "#/users", icon: "users", name: "Sotuvchilar" },
   { perm: "menu", href: "#/menu", icon: "box", name: "Mahsulotlar" },
   { perm: "reports", href: "#/reports", icon: "reports", name: "Hisobotlar" },
+  { id: "finance", icon: "finance", name: "Moliya", children: [
+    { perm: "finance", href: "#/finance", icon: "cashier", name: "Kassa" },
+    { perm: "finance", href: "#/finance/entries", icon: "list", name: "Tranzaksiyalar" },
+    { perm: "finance", href: "#/finance/types", icon: "plus", name: "Tranzaksiya yaratish" },
+  ] },
 ];
 // Sozlamalar alohida: yuqori o'ngdagi tugma, ichida yorliqlar
 const SETTINGS_TABS = [
@@ -926,6 +936,203 @@ async function viewDashboard() {
   await render();
 }
 
+// ------------------------------------------------------------ moliya
+
+const ACCOUNTS = [["cash", "Naqd", "cash"], ["card", "Karta", "card"], ["payme", "Payme", "phone"], ["click", "Click", "phone"]];
+const DIRECTION_NAMES = { in: "Kirim", out: "Chiqim" };
+const accountName = (a) => (ACCOUNTS.find((x) => x[0] === a) || [a, a])[1];
+
+function signedMoney(direction, amount) {
+  return `<b class="amount-${direction}">${direction === "in" ? "+" : "−"}${money(amount)}</b>`;
+}
+
+function entryModal(direction, balance, onSaved) {
+  api("GET", "/api/finance/types").then((types) => {
+    const list = types.filter((t) => t.direction === direction);
+    const balances = {};
+    balance.accounts.forEach((a) => { balances[a.account] = a.balance; });
+    openModal(`
+      <form id="f">
+        <div class="modal-head"><h2>${direction === "in" ? "➕ Kirim" : "➖ Chiqim"}</h2>
+          <button type="button" class="icon-btn" data-close aria-label="Yopish">✕</button></div>
+        <label><span>Tranzaksiya</span>
+          <select name="type_id" required>
+            ${list.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}
+          </select>
+          ${list.length ? "" : `<small class="error">Bu turda tranzaksiya yo'q — "Tranzaksiya yaratish" bo'limida yarating</small>`}
+        </label>
+        <span class="field-label">Hisob</span>
+        <div class="account-pick">
+          ${ACCOUNTS.map(([k, name, ic], i) => `
+            <label class="account-option"><input type="radio" name="account" value="${k}" ${i === 0 ? "checked" : ""}>
+              <span>${icon(ic)}<b>${name}</b><small>${money(balances[k] || 0)}</small></span></label>`).join("")}
+        </div>
+        <label><span>Summa (so'm)</span><input name="amount" type="number" min="1" step="1" required inputmode="numeric"></label>
+        <label><span>Izoh <i>(ixtiyoriy)</i></span><input name="comment" maxlength="200" placeholder="Masalan: mijoz ismi yoki ta'minotchi"></label>
+        <p class="muted small-note">Saqlangan tranzaksiyani o'zgartirib bo'lmaydi, faqat bekor qilish mumkin.</p>
+        <div class="actions"><button type="button" class="btn" data-close>Bekor</button>
+          <button class="btn primary" ${list.length ? "" : "disabled"}>Saqlash</button></div>
+      </form>`, (m) => $("#f", m).addEventListener("submit", safe(async (e) => {
+      e.preventDefault();
+      const btn = $("button.primary", e.target);
+      btn.disabled = true;
+      try {
+        await api("POST", "/api/finance/entries", formData(e.target));
+      } finally {
+        btn.disabled = false;
+      }
+      closeModal();
+      toast((direction === "in" ? "Kirim" : "Chiqim") + " saqlandi ✅");
+      onSaved();
+    })));
+  }).catch((e) => toast(e.message, true));
+}
+
+function entriesTable(entries, withCancel) {
+  if (!entries.length) return `<p class="muted">Tranzaksiyalar yo'q</p>`;
+  return `
+    <div class="table-scroll"><table class="list finance-table">
+      <thead><tr><th>Sana</th><th>Tranzaksiya</th><th>Hisob</th><th>Izoh</th><th>Xodim</th>
+        <th class="right">Summa</th><th>Holati</th>${withCancel ? "<th></th>" : ""}</tr></thead>
+      <tbody>
+        ${entries.map((e) => `
+          <tr class="${e.status === "cancelled" ? "cancelled" : ""}">
+            <td class="nowrap">${esc(e.created_at.slice(0, 16))}</td>
+            <td><span class="dir-dot dir-${e.direction}">${icon(e.direction)}</span>${esc(e.type_name)}
+              ${e.source === "sale" ? `<span class="badge">avtomatik</span>` : ""}</td>
+            <td>${accountName(e.account)}</td>
+            <td class="muted">${esc(e.comment || "")}</td>
+            <td class="muted">${esc(e.user_name || "")}</td>
+            <td class="right nowrap">${signedMoney(e.direction, e.amount)}</td>
+            <td>${e.status === "cancelled"
+              ? `<span class="badge off" title="${esc((e.cancelled_by_name || "") + (e.cancel_reason ? ": " + e.cancel_reason : ""))}">Bekor qilingan</span>`
+              : `<span class="badge ok">Bajarildi</span>`}</td>
+            ${withCancel ? `<td class="right">${e.source === "manual" && e.status === "done"
+              ? `<button class="btn small danger" data-cancel="${e.id}">Bekor qilish</button>` : ""}</td>` : ""}
+          </tr>`).join("")}
+      </tbody>
+    </table></div>`;
+}
+
+function bindCancel(root, onDone) {
+  $$("[data-cancel]", root).forEach((b) => b.addEventListener("click", safe(async () => {
+    const reason = prompt("Tranzaksiya bekor qilinadi (o'chirilmaydi, tarixda qoladi).\nSababini yozing:");
+    if (reason === null) return;
+    await api("POST", `/api/finance/entries/${b.dataset.cancel}/cancel`, { reason });
+    toast("Tranzaksiya bekor qilindi");
+    onDone();
+  })));
+}
+
+async function viewFinanceCash() {
+  const [balance, recent] = await Promise.all([api("GET", "/api/finance/balance"), api("GET", "/api/finance/entries")]);
+  const view = layout(`
+    <div class="toolbar">
+      <h2>Kassa</h2>
+      <button class="btn primary" id="add-in">${icon("in")} Kirim</button>
+      <button class="btn" id="add-out">${icon("out")} Chiqim</button>
+    </div>
+    <div class="kpi-row finance-balances">
+      <div class="kpi total-kpi">
+        <div class="kpi-head"><span class="kpi-icon">${icon("finance")}</span>Umumiy balans</div>
+        <div class="kpi-value ${balance.total < 0 ? "negative" : ""}">${money(balance.total)}</div>
+        <div class="kpi-sub">barcha hisoblar</div>
+      </div>
+      ${balance.accounts.map((a) => `
+        <div class="kpi">
+          <div class="kpi-head"><span class="kpi-icon">${icon((ACCOUNTS.find((x) => x[0] === a.account) || [0, 0, "card"])[2])}</span>
+            ${accountName(a.account)}</div>
+          <div class="kpi-value ${a.balance < 0 ? "negative" : ""}">${money(a.balance)}</div>
+          <div class="kpi-breakdown">
+            <span>Savdo</span><b>${money(a.sales)}</b>
+            <span>Kirim</span><b class="amount-in">+${money(a.in)}</b>
+            <span>Chiqim</span><b class="amount-out">−${money(a.out)}</b>
+          </div>
+        </div>`).join("")}
+    </div>
+    <div class="panel">
+      <div class="toolbar"><h3 style="margin:0;flex:1">So'nggi tranzaksiyalar</h3>
+        <a class="btn small" href="#/finance/entries">Hammasi →</a></div>
+      ${entriesTable(recent.entries.slice(0, 10), true)}
+    </div>`);
+  const reload = () => viewFinanceCash().catch((e) => toast(e.message, true));
+  $("#add-in", view).addEventListener("click", () => entryModal("in", balance, reload));
+  $("#add-out", view).addEventListener("click", () => entryModal("out", balance, reload));
+  bindCancel(view, reload);
+}
+
+async function viewFinanceEntries() {
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const q = new URLSearchParams();
+  ["from", "to", "direction", "account", "source"].forEach((k) => { if (params.get(k)) q.set(k, params.get(k)); });
+  const d = await api("GET", "/api/finance/entries?" + q.toString());
+  const sel = (name, options, value) => `<select name="${name}" style="width:auto">${options.map(([k, v]) =>
+    `<option value="${k}" ${k === (value || "") ? "selected" : ""}>${v}</option>`).join("")}</select>`;
+  const view = layout(`
+    <div class="toolbar"><h2>Tranzaksiyalar</h2></div>
+    <form class="filters" id="filters">
+      <input type="date" name="from" value="${d.from}" style="width:auto">
+      <input type="date" name="to" value="${d.to}" style="width:auto">
+      ${sel("direction", [["", "Kirim va chiqim"], ["in", "Faqat kirim"], ["out", "Faqat chiqim"]], params.get("direction"))}
+      ${sel("account", [["", "Barcha hisoblar"], ...ACCOUNTS.map(([k, v]) => [k, v])], params.get("account"))}
+      ${sel("source", [["all", "Savdo va qo'lda"], ["manual", "Faqat qo'lda kiritilgan"], ["sales", "Faqat savdo"]], params.get("source") || "all")}
+      <button class="btn primary">Ko'rsatish</button>
+    </form>
+    <div class="finance-totals">
+      <div><span class="muted">Kirim</span><b class="amount-in">+${money(d.total_in)}</b></div>
+      <div><span class="muted">Chiqim</span><b class="amount-out">−${money(d.total_out)}</b></div>
+      <div><span class="muted">Farq</span><b>${money(d.total_in - d.total_out)}</b></div>
+    </div>
+    <div class="panel">${entriesTable(d.entries, true)}</div>`);
+  $("#filters", view).addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = new URLSearchParams();
+    new FormData(e.target).forEach((v, k) => { if (v && v !== "all") f.set(k, v); });
+    go("#/finance/entries?" + f.toString());
+  });
+  bindCancel(view, () => router());
+}
+
+async function viewFinanceTypes() {
+  const types = await api("GET", "/api/finance/types");
+  const view = layout(`
+    <div class="two-col">
+      <form class="panel" id="f">
+        <h2>Tranzaksiya yaratish</h2>
+        <label><span>Nomi</span><input name="name" required minlength="2" maxlength="80" placeholder="Masalan: Ijara to'lovi"></label>
+        <span class="field-label">Turi</span>
+        <div class="kind-switch">
+          <label class="kind-option"><input type="radio" name="direction" value="in" checked>
+            <span>${icon("in")} Kirim<small>Kassaga pul tushadi</small></span></label>
+          <label class="kind-option"><input type="radio" name="direction" value="out">
+            <span>${icon("out")} Chiqim<small>Kassadan pul chiqadi</small></span></label>
+        </div>
+        <p class="muted small-note">Nomi takrorlanmaydi. Yaratilgan tranzaksiyani o'zgartirib bo'lmaydi.</p>
+        <div class="actions"><button class="btn primary">Yaratish</button></div>
+      </form>
+      <div class="panel">
+        <h2>Tranzaksiyalar ro'yxati</h2>
+        <table class="list">
+          <thead><tr><th>Nomi</th><th>Turi</th><th>Ishlatilgan</th><th>Yaratgan</th></tr></thead>
+          <tbody>
+            ${types.map((t) => `
+              <tr><td><b>${esc(t.name)}</b> ${t.is_system ? `<span class="badge">bazaviy</span>` : ""}</td>
+                <td><span class="dir-dot dir-${t.direction}">${icon(t.direction)}</span>${DIRECTION_NAMES[t.direction]}</td>
+                <td class="muted">${t.used} marta</td>
+                <td class="muted">${t.is_system ? "tizim" : esc(t.created_by_name || "")} · ${esc(t.created_at.slice(0, 10))}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>`);
+  $("#f", view).addEventListener("submit", safe(async (e) => {
+    e.preventDefault();
+    await api("POST", "/api/finance/types", formData(e.target));
+    toast("Tranzaksiya yaratildi ✅");
+    viewFinanceTypes();
+  }));
+}
+
 // ------------------------------------------------------------ hisobot
 
 async function viewReports() {
@@ -1246,6 +1453,7 @@ const PERMISSION_LIST = [
   ["kitchen", "kitchen", "Oshxona ekrani"],
   ["reports", "reports", "Hisobot"],
   ["menu", "menu", "Menyu"],
+  ["finance", "finance", "Moliya (kassa, kirim-chiqim)"],
   ["halls", "halls", "Zallar va stollar"],
   ["printers", "printer", "Printerlar"],
   ["users", "users", "Xodimlar"],
@@ -1690,6 +1898,9 @@ async function viewSettings() {
 
 const routes = [
   [/^#\/dashboard$/, viewDashboard, ["reports"]],
+  [/^#\/finance$/, viewFinanceCash, ["finance"]],
+  [/^#\/finance\/entries$/, viewFinanceEntries, ["finance"]],
+  [/^#\/finance\/types$/, viewFinanceTypes, ["finance"]],
   [/^#\/tables$/, viewTables, ["tables"]],
   [/^#\/order\/(\d+)$/, viewOrder, ["tables", "cashier", "reports"]],
   [/^#\/kitchen$/, viewKitchen, ["kitchen"]],

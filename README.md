@@ -34,6 +34,8 @@ Linux/macOS: `python3 desktop.py` (yoki faqat server: `python3 server.py`)
 - 🪑 **Stollar** — bo'sh/band holati, joriy summa; bosilganda buyurtma ochiladi
 - 🥡 **Olib ketish** buyurtmalari
 - 🧾 **Buyurtma** — kategoriya bo'yicha menyu, miqdorni +/− bilan o'zgartirish
+- 💵 **Moliya** — Kassa (Naqd/Karta/Payme/Click balansi), kirim-chiqim, tranzaksiyalar tarixi,
+  tranzaksiya turlari (takrorlanmaydi, o'zgartirilmaydi; bajarilgani bekor qilinadi, o'chirilmaydi)
 - 🧾 **Xizmat haqi** — stolda o'tirganlarga foiz (⚙️ Sozlamalar); har bir zal uchun alohida foiz qo'yish mumkin
 - 💰 **Kassa** — naqd / karta / Payme / Click, chegirma, qaytim hisoblash
 - 🖨️ **Chek** — 58/80 mm termoprinterga chop etish

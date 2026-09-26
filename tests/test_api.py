@@ -494,6 +494,58 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(self.waiter.call("GET", "/api/dashboard")[0], 403)
         self.assertEqual(self.admin.call("GET", "/api/dashboard?period=x")[0], 400)
 
+    def test_finance(self):
+        _, types = self.admin.call("GET", "/api/finance/types")
+        names = {t["name"]: t for t in types}
+        topup = names["Mijoz balansini to'ldirish"]
+        supplier = names["Ta'minotchiga pul berish"]
+        self.assertEqual((topup["direction"], topup["is_system"]), ("in", 1))
+        self.assertEqual((supplier["direction"], supplier["is_system"]), ("out", 1))
+
+        # Dublikat bo'lmaydi (katta-kichik harf va bo'sh joylar farqi hisobga olinmaydi)
+        status, _ = self.admin.call("POST", "/api/finance/types", {"name": "  mijoz  balansini TO'LDIRISH ", "direction": "in"})
+        self.assertEqual(status, 409)
+        status, rent = self.admin.call("POST", "/api/finance/types", {"name": "Ijara to'lovi", "direction": "out"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.admin.call("POST", "/api/finance/types", {"name": "X", "direction": "in"})[0], 400)
+        self.assertEqual(self.admin.call("POST", "/api/finance/types", {"name": "Boshqa", "direction": "?"})[0], 400)
+        # O'zgartirib/o'chirib bo'lmaydi
+        self.assertEqual(self.admin.call("PUT", f"/api/finance/types/{rent['id']}", {"name": "Y"})[0], 404)
+        self.assertEqual(self.admin.call("DELETE", f"/api/finance/types/{rent['id']}")[0], 404)
+
+        _, before = self.admin.call("GET", "/api/finance/balance")
+        cash0 = next(a for a in before["accounts"] if a["account"] == "cash")["balance"]
+        _, e1 = self.admin.call("POST", "/api/finance/entries",
+                                {"type_id": topup["id"], "account": "cash", "amount": 100000, "comment": "Ali aka"})
+        _, e2 = self.admin.call("POST", "/api/finance/entries", {"type_id": rent["id"], "account": "cash", "amount": 30000})
+        self.assertEqual(self.admin.call("POST", "/api/finance/entries", {"type_id": rent["id"], "account": "bank", "amount": 1})[0], 400)
+        self.assertEqual(self.admin.call("POST", "/api/finance/entries", {"type_id": rent["id"], "account": "cash", "amount": 0})[0], 400)
+        _, bal = self.admin.call("GET", "/api/finance/balance")
+        self.assertEqual(next(a for a in bal["accounts"] if a["account"] == "cash")["balance"] - cash0, 70000)
+
+        # Savdo tushumi ham kassaga tushadi
+        order = self.new_order_with(self.admin.call("GET", "/api/products")[1][0]["id"])
+        _, paid = self.cashier.call("POST", f"/api/orders/{order['id']}/pay", {"method": "cash"})
+        _, bal2 = self.admin.call("GET", "/api/finance/balance")
+        self.assertEqual(next(a for a in bal2["accounts"] if a["account"] == "cash")["balance"] - cash0, 70000 + paid["total"])
+
+        # Bekor qilish: balansdan chiqadi, lekin ro'yxatda qoladi; ikki marta bekor qilib bo'lmaydi
+        self.assertEqual(self.admin.call("POST", f"/api/finance/entries/{e2['id']}/cancel", {"reason": "xato"})[0], 200)
+        self.assertEqual(self.admin.call("POST", f"/api/finance/entries/{e2['id']}/cancel")[0], 409)
+        self.assertIn(self.admin.call("DELETE", f"/api/finance/entries/{e2['id']}")[0], (404, 405))  # o'chirib bo'lmaydi
+        _, bal3 = self.admin.call("GET", "/api/finance/balance")
+        self.assertEqual(next(a for a in bal3["accounts"] if a["account"] == "cash")["balance"] - cash0, 100000 + paid["total"])
+        _, lst = self.admin.call("GET", "/api/finance/entries")
+        mine = {e["id"]: e for e in lst["entries"] if e["source"] == "manual"}
+        self.assertEqual(mine[e2["id"]]["status"], "cancelled")
+        self.assertEqual(mine[e1["id"]]["comment"], "Ali aka")
+        self.assertTrue(any(e["source"] == "sale" and e["id"] == order["id"] for e in lst["entries"]))
+        _, only_out = self.admin.call("GET", "/api/finance/entries?direction=out")
+        self.assertTrue(all(e["direction"] == "out" for e in only_out["entries"]))
+
+        # Ruxsatsiz xodim kira olmaydi
+        self.assertEqual(self.cashier.call("GET", "/api/finance/balance")[0], 403)
+
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})
