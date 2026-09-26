@@ -87,12 +87,30 @@ async function api(method, url, body) {
 }
 
 // Xatoni foydalanuvchiga ko'rsatadigan o'ram
+// Xatoni ko'rsatadi va so'rov tugaguncha tugmani bloklaydi - ikki marta bosilsa ikki marta saqlanmaydi
 function safe(fn) {
   return async (...args) => {
+    const e = args[0];
+    let btn = null;
+    if (e && e.type === "submit") {
+      btn = e.submitter || $("button:not([type=button])", e.target);
+    } else if (e && e.currentTarget && e.currentTarget.tagName === "BUTTON") {
+      btn = e.currentTarget;
+    }
+    if (btn) {
+      if (btn.dataset.busy) return;
+      btn.dataset.busy = "1";
+      btn.disabled = true;
+    }
     try {
       return await fn(...args);
-    } catch (e) {
-      toast(e.message, true);
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      if (btn) {
+        delete btn.dataset.busy;
+        btn.disabled = false;
+      }
     }
   };
 }

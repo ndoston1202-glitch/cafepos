@@ -1111,6 +1111,41 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(Client(self.base).call("POST", "/api/login", {"pin": "5555"})[0], 200)
         server.LOGIN_GUARD.ok("127.0.0.1")
 
+    def test_no_duplicates(self):
+        a = self.admin
+        _, cat = a.call("POST", "/api/categories", {"name": "Dublikat kategoriya"})
+        self.assertEqual(a.call("POST", "/api/categories", {"name": "  dublikat   KATEGORIYA "})[0], 409)
+        _, cat2 = a.call("POST", "/api/categories", {"name": "Boshqa kategoriya"})
+        self.assertEqual(a.call("PUT", f"/api/categories/{cat2['id']}", {"name": "Dublikat kategoriya"})[0], 409)
+        self.assertEqual(a.call("PUT", f"/api/categories/{cat['id']}", {"name": "Dublikat kategoriya"})[0], 200)
+
+        _, p = a.call("POST", "/api/products", {"name": "Dublikat taom", "price": 1000})
+        status, err = a.call("POST", "/api/products", {"name": "dublikat taom", "price": 2000})
+        self.assertEqual(status, 409)
+        self.assertIn("allaqachon bor", err["error"])
+        _, p2 = a.call("POST", "/api/products", {"name": "Boshqa taom", "price": 1000})
+        self.assertEqual(a.call("PUT", f"/api/products/{p2['id']}", {"name": "Dublikat taom", "price": 1})[0], 409)
+        # o'chirilgan mahsulot nomi qayta ishlatilishi mumkin
+        a.call("DELETE", f"/api/products/{p['id']}")
+        self.assertEqual(a.call("POST", "/api/products", {"name": "Dublikat taom", "price": 1000})[0], 200)
+
+        _, hall = a.call("POST", "/api/halls", {"name": "Dublikat zal"})
+        self.assertEqual(a.call("POST", "/api/halls", {"name": "dublikat zal"})[0], 409)
+        self.assertEqual(a.call("POST", "/api/tables", {"name": "D1", "hall_id": hall["id"]})[0], 200)
+        self.assertEqual(a.call("POST", "/api/tables", {"name": "d1", "hall_id": hall["id"]})[0], 409)
+
+        self.assertEqual(a.call("POST", "/api/suppliers", {"name": "Dublikat ta'minotchi", "phone": "90 700 11 22"})[0], 200)
+        self.assertEqual(a.call("POST", "/api/suppliers", {"name": "dublikat ta'minotchi"})[0], 409)
+        self.assertEqual(a.call("POST", "/api/suppliers", {"name": "Boshqa nom", "phone": "+998 90 700 11 22"})[0], 409)
+
+        self.assertEqual(a.call("POST", "/api/customers", {"name": "Dub Mijoz", "phone": "+998 93 700 11 22", "gender": "m"})[0], 200)
+        self.assertEqual(a.call("POST", "/api/customers", {"name": "Boshqa", "phone": "937001122", "gender": "m"})[0], 409)
+
+        self.assertEqual(a.call("POST", "/api/users", {"first_name": "Dub", "phone": "+998 94 700 11 22",
+                                                       "role": "staff", "permissions": ["tables"], "pin": "6061"})[0], 200)
+        self.assertEqual(a.call("POST", "/api/users", {"first_name": "Dub2", "phone": "94 700 11 22",
+                                                       "role": "staff", "permissions": ["tables"], "pin": "6062"})[0], 409)
+
 
 
 class PrintingTest(unittest.TestCase):

@@ -414,6 +414,17 @@ def require(data, *fields):
             raise ApiError(400, f"'{f}' maydoni to'ldirilmagan")
 
 
+def ensure_unique(conn, table, name, label, exclude_id=None, where="", args=()):
+    """Bir xil nomli yozuv ikkinchi marta yaratilmasin (katta-kichik harf va ortiqcha bo'shliqlar hisobga olinmaydi)."""
+    sql = f"SELECT 1 FROM {table} WHERE lower(trim(name)) = lower(?) {where}"
+    params = [name, *args]
+    if exclude_id:
+        sql += " AND id != ?"
+        params.append(exclude_id)
+    if conn.execute(sql, params).fetchone():
+        raise ApiError(409, f"\"{name}\" nomli {label} allaqachon bor")
+
+
 def to_int(value, field, minimum=None):
     try:
         n = int(value)
@@ -544,9 +555,11 @@ def list_categories(conn, user, params, data, query):
 @route("POST", "/api/categories", ("menu",))
 def create_category(conn, user, params, data, query):
     require(data, "name")
+    name = clean_name(data["name"])
+    ensure_unique(conn, "categories", name, "kategoriya")
     cur = conn.execute(
         "INSERT INTO categories (name, sort) VALUES (?, ?)",
-        (data["name"].strip(), to_int(data.get("sort", 0), "sort")),
+        (name, to_int(data.get("sort", 0), "sort")),
     )
     return {"id": cur.lastrowid}
 
@@ -554,9 +567,11 @@ def create_category(conn, user, params, data, query):
 @route("PUT", r"/api/categories/(\d+)", ("menu",))
 def update_category(conn, user, params, data, query):
     require(data, "name")
+    name = clean_name(data["name"])
+    ensure_unique(conn, "categories", name, "kategoriya", params[0])
     conn.execute(
         "UPDATE categories SET name = ?, sort = ? WHERE id = ?",
-        (data["name"].strip(), to_int(data.get("sort", 0), "sort"), params[0]),
+        (name, to_int(data.get("sort", 0), "sort"), params[0]),
     )
     return {"ok": True}
 
@@ -592,7 +607,7 @@ def product_values(data):
     require(data, "name", "price")
     return (
         data.get("category_id") or None,
-        data["name"].strip(),
+        clean_name(data["name"]),
         to_int(data["price"], "price", 0),
         to_int(data.get("cost") or 0, "cost", 0),
         data.get("printer_id") or None,
@@ -634,6 +649,7 @@ def save_product_image(conn, product_id, data):
 
 @route("POST", "/api/products", ("menu",))
 def create_product(conn, user, params, data, query):
+    ensure_unique(conn, "products", clean_name(data.get("name")), "mahsulot", where="AND active = 1")
     cur = conn.execute(
         "INSERT INTO products (category_id, name, price, cost, printer_id) VALUES (?,?,?,?,?)",
         product_values(data),
@@ -644,6 +660,7 @@ def create_product(conn, user, params, data, query):
 
 @route("PUT", r"/api/products/(\d+)", ("menu",))
 def update_product(conn, user, params, data, query):
+    ensure_unique(conn, "products", clean_name(data.get("name")), "mahsulot", params[0], "AND active = 1")
     conn.execute(
         "UPDATE products SET category_id = ?, name = ?, price = ?, cost = ?, printer_id = ? WHERE id = ?",
         (*product_values(data), params[0]),
@@ -699,22 +716,24 @@ def hall_values(data):
     require(data, "name")
     percent = data.get("service_percent")
     percent = None if percent in (None, "") else to_percent(percent, "service_percent")
-    return data["name"].strip(), to_int(data.get("sort") or 0, "sort"), percent
+    return clean_name(data["name"]), to_int(data.get("sort") or 0, "sort"), percent
 
 
 @route("POST", "/api/halls", ("halls",))
 def create_hall(conn, user, params, data, query):
-    cur = conn.execute(
-        "INSERT INTO halls (name, sort, service_percent) VALUES (?, ?, ?)", hall_values(data)
-    )
+    values = hall_values(data)
+    ensure_unique(conn, "halls", values[0], "zal")
+    cur = conn.execute("INSERT INTO halls (name, sort, service_percent) VALUES (?, ?, ?)", values)
     return {"id": cur.lastrowid}
 
 
 @route("PUT", r"/api/halls/(\d+)", ("halls",))
 def update_hall(conn, user, params, data, query):
+    values = hall_values(data)
+    ensure_unique(conn, "halls", values[0], "zal", params[0])
     conn.execute(
         "UPDATE halls SET name = ?, sort = ?, service_percent = ? WHERE id = ?",
-        (*hall_values(data), params[0]),
+        (*values, params[0]),
     )
     return {"ok": True}
 
@@ -739,7 +758,12 @@ def table_values(conn, data):
     hall_id = data.get("hall_id") or None
     if hall_id and not conn.execute("SELECT 1 FROM halls WHERE id = ?", (hall_id,)).fetchone():
         raise ApiError(404, "Zal topilmadi")
-    return data["name"].strip(), to_int(data.get("seats") or 4, "seats", 1), hall_id
+    return clean_name(data["name"]), to_int(data.get("seats") or 4, "seats", 1), hall_id
+
+
+def ensure_unique_table(conn, values, exclude_id=None):
+    ensure_unique(conn, "tables", values[0], "stol (shu zalda)", exclude_id,
+                  "AND active = 1 AND COALESCE(hall_id, 0) = ?", (values[2] or 0,))
 
 
 @route("GET", "/api/tables")
@@ -773,18 +797,19 @@ def list_tables(conn, user, params, data, query):
 
 @route("POST", "/api/tables", ("halls",))
 def create_table(conn, user, params, data, query):
-    cur = conn.execute(
-        "INSERT INTO tables (name, seats, hall_id) VALUES (?, ?, ?)",
-        table_values(conn, data),
-    )
+    values = table_values(conn, data)
+    ensure_unique_table(conn, values)
+    cur = conn.execute("INSERT INTO tables (name, seats, hall_id) VALUES (?, ?, ?)", values)
     return {"id": cur.lastrowid}
 
 
 @route("PUT", r"/api/tables/(\d+)", ("halls",))
 def update_table(conn, user, params, data, query):
+    values = table_values(conn, data)
+    ensure_unique_table(conn, values, params[0])
     conn.execute(
         "UPDATE tables SET name = ?, seats = ?, hall_id = ? WHERE id = ?",
-        (*table_values(conn, data), params[0]),
+        (*values, params[0]),
     )
     return {"ok": True}
 
@@ -997,7 +1022,7 @@ def printer_values(data):
         raise ApiError(400, "Ro'yxatdan printerni tanlang" if data["kind"] == "system" else "Printer IP manzilini kiriting")
     width = to_int(data.get("width", 80), "width")
     return (
-        data["name"].strip(),
+        clean_name(data["name"]),
         data["kind"],
         data["address"].strip(),
         to_int(data.get("port") or 9100, "port", 1),
@@ -1012,18 +1037,19 @@ def list_printers(conn, user, params, data, query):
 
 @route("POST", "/api/printers", ("printers",))
 def create_printer(conn, user, params, data, query):
-    cur = conn.execute(
-        "INSERT INTO printers (name, kind, address, port, width) VALUES (?,?,?,?,?)",
-        printer_values(data),
-    )
+    values = printer_values(data)
+    ensure_unique(conn, "printers", values[0], "printer", where="AND active = 1")
+    cur = conn.execute("INSERT INTO printers (name, kind, address, port, width) VALUES (?,?,?,?,?)", values)
     return {"id": cur.lastrowid}
 
 
 @route("PUT", r"/api/printers/(\d+)", ("printers",))
 def update_printer(conn, user, params, data, query):
+    values = printer_values(data)
+    ensure_unique(conn, "printers", values[0], "printer", params[0], "AND active = 1")
     conn.execute(
         "UPDATE printers SET name = ?, kind = ?, address = ?, port = ?, width = ? WHERE id = ?",
-        (*printer_values(data), params[0]),
+        (*values, params[0]),
     )
     return {"ok": True}
 
@@ -1734,6 +1760,8 @@ def create_supplier(conn, user, params, data, query):
     if conn.execute("SELECT 1 FROM suppliers WHERE name = ? COLLATE NOCASE", (name,)).fetchone():
         raise ApiError(409, f"\"{name}\" nomli ta'minotchi allaqachon bor")
     phone = normalize_phone(data["phone"]) if (data.get("phone") or "").strip() else None
+    if phone and conn.execute("SELECT 1 FROM suppliers WHERE phone = ?", (phone,)).fetchone():
+        raise ApiError(409, f"{phone} raqamli ta'minotchi allaqachon bor")
     cur = conn.execute(
         "INSERT INTO suppliers (name, phone, created_at, created_by) VALUES (?, ?, ?, ?)",
         (name, phone, now(), user["id"]),
@@ -2204,6 +2232,11 @@ def user_values(conn, user, data, target=None):
         perms = json.dumps([p for p in PERMISSIONS if p in data["permissions"]])
     else:
         perms = target["permissions"] if target and target["role"] == data["role"] else None
+    digits = re.sub(r"\D", "", phone or "")
+    if digits:
+        for other in conn.execute("SELECT id, phone FROM users WHERE active = 1 AND phone IS NOT NULL"):
+            if re.sub(r"\D", "", other["phone"])[-9:] == digits[-9:] and (not target or other["id"] != target["id"]):
+                raise ApiError(409, f"{phone} raqamli xodim allaqachon bor")
     return first, last, f"{first} {last}".strip(), phone, data["role"], perms
 
 
