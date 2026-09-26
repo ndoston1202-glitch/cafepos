@@ -51,11 +51,25 @@ Linux/macOS: `python3 desktop.py` (yoki faqat server: `python3 server.py`)
 - 🍽️ **Menyu** — taom nomi, tannarxi, sotish narxi, rasmi, kategoriyasi va printeri
 - 💹 **Foyda** — tannarx asosida hisobotda foyda ko'rinadi
 - 👥 **Xodimlar** — rollar va login
+- 📓 **Jurnal** — barcha amallar (sotuv, taom qo'shish, kirim-chiqim, qarz, mahsulot, xodim, sozlama, tizimga kirish):
+  kim, qachon va nima qilgani. Qatorni bossangiz batafsil ma'lumot ochiladi. Yozuvlar o'chirilmaydi
+- 🔌 **Integratsiyalar** — tashqi xizmatlar bilan ulanish (yangilari qo'shib boriladi):
+  - **Telegram bot** — jurnaldagi amallar tanlangan chat/guruhlarga xabar bo'lib boradi
+
+### 🤖 Telegram botni ulash
+
+1. Telegram'da **@BotFather** → `/newbot` → bot nomini yozing → **token** beriladi
+2. CafePOS → **Integratsiyalar → Telegram bot** → tokenni qo'ying → **Tekshirish**
+3. Botingizni Telegram'da oching va **/start** bosing (guruh uchun: botni guruhga qo'shing va biror narsa yozing)
+4. **Chatlarni topish** → kerakli chatlarni qo'shing
+5. Qaysi bo'limlar yuborilishini belgilang, **Yoqilgan** ni yoqing → **Saqlash** → **Sinov xabari yuborish**
+
+Kompyuterda internet bo'lishi kerak. Internet uzilsa dastur ishlashda davom etadi, xato Telegram sahifasida ko'rinadi.
 
 ### Xodimlar va ruxsatlar
 
 **👥 Xodimlar → + Xodim qo'shish**: ismi, familiyasi, username, parol, telefon, rol va
-**bo'limlarga kirish ruxsati** (Stollar, Kassa, Oshxona, Hisobot, Menyu, Zallar, Printerlar, Xodimlar, Sozlamalar).
+**bo'limlarga kirish ruxsati** (Stollar, Kassa, Oshxona, Hisobot, Menyu, CRM, Moliya, Zallar, Printerlar, Xodimlar, Sozlamalar, Jurnal, Integratsiyalar).
 Rol tanlanganda standart ruxsatlar belgilanadi, keyin xohlagancha o'zgartirish mumkin.
 Ruxsat serverda tekshiriladi va darhol kuchga kiradi.
 
@@ -115,6 +129,7 @@ Yuqoridagi ro'yxatdan bo'limni (masalan faqat "Oshxona" yoki "Bar") tanlash mumk
 - Backend: Python standart kutubxonasi (`http.server` + `sqlite3`) — `server.py`
 - Desktop oyna: `desktop.py` (Chrome/Edge ilova rejimi `--app`)
 - Printerlar: `printing.py` (Windows `winspool`, CUPS, TCP 9100)
+- Telegram: `telegram.py` (Bot API, xabarlar orqa fonda navbat bilan yuboriladi)
 - Frontend: oddiy HTML/CSS/JavaScript — `static/`
 - Taom rasmlari `uploads/` papkasida saqlanadi
 - Parollar PBKDF2 bilan xeshlanadi, sessiya HttpOnly cookie orqali

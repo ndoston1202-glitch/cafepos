@@ -327,6 +327,9 @@ const ICONS = {
   out: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   collapse: '<path d="m11 17-5-5 5-5M18 17l-5-5 5-5"/>',
   expand: '<path d="m6 17 5-5-5-5M13 17l5-5-5-5"/>',
+  journal: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/><path d="M9 7h7M9 11h5"/>',
+  plug: '<path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0Z"/><path d="M12 18v4"/>',
+  telegram: '<path d="m22 3-9.5 18-3-7.5L2 10.5Z"/><path d="m9.5 13.5 5-5"/>',
 };
 
 function icon(name) {
@@ -355,6 +358,8 @@ const NAV = [
     { perm: "finance", href: "#/finance/types", icon: "plus", name: "Tranzaksiya yaratish" },
     { perm: "finance", href: "#/finance/balances", icon: "scale", name: "Balansni o'rnatish" },
   ] },
+  { perm: "journal", href: "#/journal", icon: "journal", name: "Jurnal" },
+  { perm: "integrations", href: "#/integrations", icon: "plug", name: "Integratsiyalar" },
 ];
 // Sozlamalar alohida: yuqori o'ngdagi tugma, ichida yorliqlar
 const SETTINGS_TABS = [
@@ -383,6 +388,7 @@ function defaultRoute() {
 // Yuqori paneldagi sarlavha: "Savdo › Stollar"
 function pageTrail(hash) {
   if (hash.startsWith("#/order/")) return ["Savdo", "Buyurtma"];
+  if (hash === "#/integrations/telegram") return ["Integratsiyalar", "Telegram bot"];
   for (const item of NAV) {
     if (item.href === hash) return [item.name];
     for (const c of item.children || []) if (c.href === hash) return [item.name, c.name];
@@ -397,7 +403,8 @@ function openGroups() {
 
 function layout(content) {
   const hash = location.hash.split("?")[0];
-  const isActive = (href) => hash === href || (href === "#/tables" && hash.startsWith("#/order/"));
+  const isActive = (href) => hash === href || (href === "#/tables" && hash.startsWith("#/order/"))
+    || (href === "#/integrations" && hash.startsWith("#/integrations/"));
   const initials = state.user.full_name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
   const saved = openGroups();
   const link = (item, sub) => `
@@ -2015,6 +2022,8 @@ const PERMISSION_LIST = [
   ["printers", "printer", "Printerlar"],
   ["users", "users", "Xodimlar"],
   ["settings", "settings", "Sozlamalar"],
+  ["journal", "journal", "Jurnal (barcha amallar)"],
+  ["integrations", "plug", "Integratsiyalar (Telegram)"],
 ];
 const ROLE_DEFAULTS = {
   admin: PERMISSION_LIST.map(([k]) => k),
@@ -2451,6 +2460,303 @@ async function viewSettings() {
   }));
 }
 
+// ------------------------------------------------------------ jurnal (barcha amallar tarixi)
+
+const JOURNAL_ICONS = { sales: "sales", orders: "tables", finance: "finance", crm: "crm", menu: "box",
+  users: "users", settings: "settings", auth: "logout" };
+// So'rov maydonlari nomlari (batafsil oynada)
+const FIELD_NAMES = {
+  name: "Nomi", price: "Narxi", cost: "Tannarxi", amount: "Summa", method: "Usul", account: "Hisob", phone: "Telefon",
+  comment: "Izoh", discount: "Chegirma", reason: "Sabab", qty: "Soni", gender: "Jinsi", due_date: "To'lov muddati",
+  balance: "Yangi balans", category_id: "Kategoriya ID", printer_id: "Printer ID", product_id: "Mahsulot ID",
+  customer_id: "Mijoz ID", supplier_id: "Ta'minotchi ID", type_id: "Tranzaksiya turi ID", direction: "Yo'nalish",
+  first_name: "Ism", last_name: "Familiya", full_name: "F.I.Sh", username: "Login", role: "Lavozim",
+  permissions: "Ruxsatlar", active: "Faol", password: "Parol", image: "Rasm", file_name: "Fayl", data: "Fayl",
+  cafe_name: "Kafe nomi", service_percent: "Xizmat haqi, %", seats: "O'rinlar", hall_id: "Zal ID", sort: "Tartib",
+  kind: "Turi", address: "Manzil", port: "Port", width: "Qog'oz kengligi", enabled: "Yoqilgan", token: "Token",
+  chats: "Chatlar", categories: "Bo'limlar", table_id: "Stol ID", type: "Turi", remove_image: "Rasmni olib tashlash",
+};
+
+function requestValue(v) {
+  if (v === true) return "ha";
+  if (v === false) return "yo'q";
+  if (v === null || v === undefined || v === "") return "—";
+  if (Array.isArray(v)) return v.map((x) => typeof x === "object" ? (x.title || x.name || x.id) : x).join(", ") || "—";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function journalDetail(id) {
+  return api("GET", `/api/journal/${id}`).then((j) => {
+    const d = j.details || {};
+    const request = Object.keys(d.request || {});
+    const orderId = (j.entity || "").indexOf("order:") === 0 ? j.entity.slice(6) : null;
+    openModal(`
+      <div class="journal-detail">
+        <div class="modal-head"><h2><span class="jr-icon cat-${esc(j.category)}">${icon(JOURNAL_ICONS[j.category] || "list")}</span>
+          ${esc(j.title)}</h2><button type="button" class="icon-btn" data-close>✕</button></div>
+        <div class="jd-meta">
+          <div><small>Vaqti</small><b>${esc(j.created_at)}</b></div>
+          <div><small>Kim qildi</small><b>${esc(j.user_name || "—")}</b>
+            ${j.username ? `<span class="muted">${esc(j.username)} · ${ROLE_NAMES[j.role] || ""}</span>` : ""}</div>
+          <div><small>Bo'lim</small><b>${esc(j.category_name)}</b></div>
+        </div>
+        ${j.summary ? `<p class="jd-summary">${esc(j.summary)}</p>` : ""}
+        ${(d.fields || []).length ? `
+          <table class="list jd-fields">${d.fields.map(([k, v]) =>
+            `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join("")}</table>` : ""}
+        ${(d.items || []).length ? `
+          <h3>Taomlar</h3>
+          <table class="list jd-items"><thead><tr><th>Nomi</th><th class="right">Soni</th>
+            ${d.items[0].price !== undefined ? `<th class="right">Narxi</th><th class="right">Summa</th>` : ""}</tr></thead>
+            <tbody>${d.items.map((i) => `<tr><td>${esc(i.name)}</td><td class="right">${i.qty}</td>
+              ${i.price !== undefined ? `<td class="right">${money(i.price)}</td><td class="right">${money(i.price * i.qty)}</td>` : ""}</tr>`).join("")}
+            </tbody></table>` : ""}
+        ${request.length ? `
+          <details class="jd-request"><summary>Kiritilgan ma'lumotlar</summary>
+            <table class="list">${request.map((k) => `<tr><th>${esc(FIELD_NAMES[k] || k)}</th>
+              <td>${esc(requestValue(d.request[k]))}</td></tr>`).join("")}</table>
+          </details>` : ""}
+        <div class="actions">
+          ${orderId && can("tables", "cashier", "reports") ? `<a class="btn" href="#/order/${orderId}">Buyurtmani ochish</a>` : ""}
+          <button type="button" class="btn primary" data-close>Yopish</button>
+        </div>
+      </div>`);
+  });
+}
+
+async function viewJournal() {
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const q = new URLSearchParams();
+  ["from", "to", "user_id", "category", "q"].forEach((k) => { if (params.get(k)) q.set(k, params.get(k)); });
+  const d = await api("GET", "/api/journal?" + q.toString());
+  const sel = (name, options, value) => `<select name="${name}" style="width:auto">${options.map(([k, v]) =>
+    `<option value="${k}" ${String(k) === (value || "") ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+  const cats = Object.keys(d.categories).map((k) => [k, d.categories[k]]);
+  const rowHtml = (i) => `
+    <tr class="clickable" data-id="${i.id}">
+      <td class="nowrap">${esc(i.created_at.slice(0, 10))}<br><b>${esc(i.created_at.slice(11, 16))}</b></td>
+      <td>${esc(i.user_name || "—")}</td>
+      <td><span class="jr-cat cat-${esc(i.category)}">${icon(JOURNAL_ICONS[i.category] || "list")}${esc(d.categories[i.category] || i.category)}</span></td>
+      <td><b>${esc(i.title)}</b><div class="muted jr-summary">${esc(i.summary || "")}</div></td>
+      <td class="right jr-more">${icon("chevron")}</td>
+    </tr>`;
+  const view = layout(`
+    <div class="toolbar"><h2>Jurnal</h2><span class="muted">${d.total} ta amal</span></div>
+    <form class="filters" id="filters">
+      <input type="date" name="from" value="${d.from}" style="width:auto">
+      <input type="date" name="to" value="${d.to}" style="width:auto">
+      ${sel("user_id", [["", "Barcha xodimlar"], ...d.users.map((u) => [u.id, u.full_name])], params.get("user_id"))}
+      ${sel("category", [["", "Barcha bo'limlar"], ...cats], params.get("category"))}
+      <input type="search" name="q" placeholder="Qidirish: taom, mijoz, summa..." value="${esc(params.get("q") || "")}" style="width:220px">
+      <button class="btn primary">Ko'rsatish</button>
+    </form>
+    <div class="panel">
+      ${d.items.length ? `
+        <div class="table-scroll"><table class="list journal-table">
+          <thead><tr><th>Vaqt</th><th>Xodim</th><th>Bo'lim</th><th>Amal</th><th></th></tr></thead>
+          <tbody id="jr-body">${d.items.map(rowHtml).join("")}</tbody>
+        </table></div>
+        ${d.total > d.items.length ? `<p style="text-align:center"><button class="btn" id="more">Yana ko'rsatish</button></p>` : ""}`
+        : `<p class="muted">Tanlangan davrda amallar yo'q</p>`}
+    </div>`);
+  $("#filters", view).addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = new URLSearchParams();
+    new FormData(e.target).forEach((v, k) => { if (v) f.set(k, v); });
+    go("#/journal?" + f.toString());
+  });
+  view.addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-id]");
+    if (tr) journalDetail(tr.dataset.id).catch((err) => toast(err.message, true));
+  });
+  let offset = d.items.length;
+  const more = $("#more", view);
+  if (more) more.addEventListener("click", safe(async () => {
+    q.set("offset", offset);
+    const next = await api("GET", "/api/journal?" + q.toString());
+    $("#jr-body", view).insertAdjacentHTML("beforeend", next.items.map(rowHtml).join(""));
+    offset += next.items.length;
+    if (offset >= next.total || !next.items.length) more.remove();
+  }));
+}
+
+// ------------------------------------------------------------ integratsiyalar
+
+// Yangi integratsiya qo'shish: shu ro'yxatga yozuv va (tayyor bo'lsa) sahifa
+const INTEGRATIONS = [
+  { key: "telegram", icon: "telegram", name: "Telegram bot", href: "#/integrations/telegram",
+    text: "Jurnaldagi amallar (sotuv, kirim-chiqim, qarz, mahsulot...) Telegram'ga xabar bo'lib boradi." },
+  { key: "sms", icon: "phone", name: "SMS xabarnoma", soon: true,
+    text: "Mijozlarga qarz muddati va aksiyalar haqida SMS." },
+  { key: "payments", icon: "card", name: "Payme / Click", soon: true,
+    text: "To'lovlarni QR orqali qabul qilish va avtomatik tasdiqlash." },
+  { key: "delivery", icon: "box", name: "Yetkazib berish", soon: true,
+    text: "Yetkazib berish xizmatlaridan buyurtmalarni qabul qilish." },
+];
+
+async function viewIntegrations() {
+  const list = await api("GET", "/api/integrations");
+  const status = {};
+  list.forEach((i) => { status[i.key] = i; });
+  layout(`
+    <div class="toolbar"><h2>Integratsiyalar</h2></div>
+    <p class="muted">Boshqa xizmatlar bilan ulanish. Yangi integratsiyalar shu yerga qo'shib boriladi.</p>
+    <div class="integration-grid">
+      ${INTEGRATIONS.map((it) => {
+        const s = status[it.key];
+        const badge = it.soon ? `<span class="badge">Tez orada</span>`
+          : s && s.enabled ? `<span class="badge ok">Ulangan</span>` : `<span class="badge">Ulanmagan</span>`;
+        const tag = it.soon ? "div" : "a";
+        return `
+          <${tag} class="integration-card ${it.soon ? "soon" : ""}" ${it.soon ? "" : `href="${it.href}"`}>
+            <div class="ic-top"><span class="ic-logo ic-${it.key}">${icon(it.icon)}</span>${badge}</div>
+            <b>${esc(it.name)}</b>
+            <p class="muted">${esc(it.text)}</p>
+            ${it.soon ? "" : `<span class="ic-link">Sozlash ${icon("chevron")}</span>`}
+          </${tag}>`;
+      }).join("")}
+    </div>`);
+}
+
+async function viewTelegram() {
+  const cfg = await api("GET", "/api/integrations/telegram");
+  let chats = cfg.chats.slice();
+  let bot = cfg.bot;
+  const cats = Object.keys(cfg.all_categories);
+  const view = layout(`
+    <div class="toolbar"><a class="btn small" href="#/integrations">← Integratsiyalar</a>
+      <h2 style="flex:1">Telegram bot</h2>
+      <label class="tg-switch"><input type="checkbox" id="tg-enabled" ${cfg.enabled ? "checked" : ""}>
+        <span class="slider"></span><b id="tg-state">${cfg.enabled ? "Yoqilgan" : "O'chirilgan"}</b></label>
+    </div>
+    <div class="tg-status" id="tg-status"></div>
+    <div class="tg-layout">
+      <section class="panel tg-step">
+        <h3><span class="step-no">1</span> Bot tokeni</h3>
+        <ol class="muted help-list">
+          <li>Telegram'da <b>@BotFather</b> ni oching va <b>/newbot</b> yozing.</li>
+          <li>Botga nom bering — BotFather <b>token</b> beradi (masalan <code>123456789:AAH...</code>).</li>
+          <li>Tokenni shu yerga qo'ying va <b>Tekshirish</b> ni bosing.</li>
+        </ol>
+        <div class="row-input">
+          <input id="tg-token" autocomplete="off" spellcheck="false"
+            placeholder="${cfg.token_set ? esc(cfg.token_hint) + " (saqlangan)" : "Bot tokeni"}">
+          <button type="button" class="btn" id="tg-check">Tekshirish</button>
+        </div>
+        <div id="tg-bot" class="tg-bot"></div>
+      </section>
+      <section class="panel tg-step">
+        <h3><span class="step-no">2</span> Xabar boradigan chatlar</h3>
+        <p class="muted">Botingizni Telegram'da oching va <b>/start</b> bosing (yoki botni guruhga qo'shib, guruhda biror narsa yozing).
+          So'ng <b>Chatlarni topish</b> ni bosing.</p>
+        <div id="tg-chats"></div>
+        <div class="row-input">
+          <button type="button" class="btn" id="tg-find">${icon("search")} Chatlarni topish</button>
+          <input id="tg-manual" placeholder="yoki chat ID ni qo'lda kiriting" style="flex:1">
+          <button type="button" class="btn small" id="tg-add">Qo'shish</button>
+        </div>
+        <div id="tg-found"></div>
+      </section>
+      <section class="panel tg-step">
+        <h3><span class="step-no">3</span> Qaysi amallar yuborilsin</h3>
+        <div class="perm-grid">
+          ${cats.map((k) => `
+            <label class="perm-item"><input type="checkbox" name="tg-cat" value="${k}" ${cfg.categories.indexOf(k) >= 0 ? "checked" : ""}>
+              ${icon(JOURNAL_ICONS[k] || "list")}<span>${esc(cfg.all_categories[k])}</span></label>`).join("")}
+        </div>
+        <p class="muted">Jurnalga yozilgan har bir amal (kim, qachon, nima qilgani) tanlangan bo'limlar bo'yicha xabar bo'lib boradi.
+          "Buyurtmalar" — taom qo'shish/oshxonaga yuborish kabi mayda amallar, ular ko'p bo'ladi.</p>
+      </section>
+    </div>
+    <div class="actions tg-actions">
+      <button type="button" class="btn" id="tg-test">Sinov xabari yuborish</button>
+      <button type="button" class="btn primary" id="tg-save">Saqlash</button>
+    </div>`);
+
+  const renderStatus = (s) => {
+    $("#tg-status", view).innerHTML = [
+      s.last_error ? `<div class="notice error-notice">⚠️ Oxirgi xato: ${esc(s.last_error)}</div>` : "",
+      s.last_ok ? `<div class="notice ok-notice">✅ Oxirgi xabar yuborildi: ${esc(s.last_ok)} · jami ${s.sent} ta</div>` : "",
+    ].join("");
+  };
+  const renderBot = () => {
+    $("#tg-bot", view).innerHTML = bot ? `${icon("telegram")} <b>@${esc(bot.username)}</b> <span class="muted">${esc(bot.first_name || "")}</span>
+      <a class="btn small" target="_blank" rel="noopener" href="https://t.me/${esc(bot.username)}">Botni ochish</a>` : "";
+  };
+  const renderChats = () => {
+    $("#tg-chats", view).innerHTML = chats.length ? `<div class="tg-chat-list">${chats.map((c, i) => `
+      <div class="tg-chat">${icon(String(c.id).charAt(0) === "-" ? "users" : "crm")}
+        <div><b>${esc(c.title || "Chat")}</b><small class="muted">ID: ${esc(c.id)}</small></div>
+        <button type="button" class="icon-btn" data-remove="${i}" title="Olib tashlash">✕</button></div>`).join("")}</div>`
+      : `<p class="muted"><i>Hali chat qo'shilmagan</i></p>`;
+    $$("[data-remove]", view).forEach((b) => b.addEventListener("click", () => {
+      chats.splice(+b.dataset.remove, 1);
+      renderChats();
+    }));
+  };
+  const addChat = (c) => {
+    if (chats.some((x) => String(x.id) === String(c.id))) return toast("Bu chat allaqachon qo'shilgan");
+    chats.push({ id: String(c.id), title: c.title || "" });
+    renderChats();
+  };
+  const token = () => $("#tg-token", view).value.trim();
+  const busy = async (btn, fn) => {
+    btn.disabled = true;
+    try { await fn(); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
+  };
+  renderStatus(cfg.status);
+  renderBot();
+  renderChats();
+
+  $("#tg-enabled", view).addEventListener("change", (e) => {
+    $("#tg-state", view).textContent = e.target.checked ? "Yoqilgan" : "O'chirilgan";
+  });
+  $("#tg-check", view).addEventListener("click", (e) => busy(e.currentTarget, async () => {
+    bot = await api("POST", "/api/integrations/telegram/check", { token: token() });
+    renderBot();
+    toast("Bot topildi: @" + bot.username);
+  }));
+  $("#tg-find", view).addEventListener("click", (e) => busy(e.currentTarget, async () => {
+    const found = await api("POST", "/api/integrations/telegram/chats", { token: token() });
+    const box = $("#tg-found", view);
+    box.innerHTML = found.length ? `<p class="muted">Topilgan chatlar — qo'shish uchun bosing:</p>
+      <div class="tg-found">${found.map((c, i) => `<button type="button" class="btn small" data-found="${i}">
+        + ${esc(c.title || c.id)} <small class="muted">${c.type === "private" ? "shaxsiy" : c.type === "channel" ? "kanal" : "guruh"}</small></button>`).join("")}</div>`
+      : `<p class="error">Chat topilmadi. Botga Telegram'da /start yozing va qayta bosing.</p>`;
+    $$("[data-found]", box).forEach((b) => b.addEventListener("click", () => {
+      addChat(found[+b.dataset.found]);
+      b.remove();
+    }));
+  }));
+  $("#tg-add", view).addEventListener("click", () => {
+    const v = $("#tg-manual", view).value.trim();
+    if (!/^-?\d{3,20}$|^@[A-Za-z0-9_]{4,64}$/.test(v)) return toast("Chat ID raqam bo'lsin (masalan 123456789 yoki -100...)", true);
+    addChat({ id: v });
+    $("#tg-manual", view).value = "";
+  });
+  const payload = () => {
+    const body = { enabled: $("#tg-enabled", view).checked, chats,
+      categories: $$("input[name=tg-cat]:checked", view).map((i) => i.value) };
+    if (token()) body.token = token();
+    if (bot) body.bot = bot;
+    return body;
+  };
+  $("#tg-save", view).addEventListener("click", (e) => busy(e.currentTarget, async () => {
+    const saved = await api("PUT", "/api/integrations/telegram", payload());
+    toast(saved.enabled ? "Saqlandi — Telegram'ga xabarlar boradi ✅" : "Saqlandi (o'chirilgan)");
+    viewTelegram();
+  }));
+  $("#tg-test", view).addEventListener("click", (e) => busy(e.currentTarget, async () => {
+    const body = { chats };
+    if (token()) body.token = token();
+    const res = await api("POST", "/api/integrations/telegram/test", body);
+    const bad = res.filter((r) => !r.ok);
+    toast(bad.length ? `Ba'zi chatlarga bormadi: ${bad.map((r) => `${r.title || r.id} (${r.error})`).join("; ")}`
+      : "Sinov xabari yuborildi — Telegram'ni tekshiring ✅", !!bad.length);
+  }));
+}
+
 // ------------------------------------------------------------ router
 
 const routes = [
@@ -2471,6 +2777,9 @@ const routes = [
   [/^#\/tables-admin$/, viewTablesAdmin, ["halls"]],
   [/^#\/users$/, viewUsers, ["users"]],
   [/^#\/settings$/, viewSettings, ["settings"]],
+  [/^#\/journal$/, viewJournal, ["journal"]],
+  [/^#\/integrations$/, viewIntegrations, ["integrations"]],
+  [/^#\/integrations\/telegram$/, viewTelegram, ["integrations"]],
   [/^#\/none$/, viewNoAccess],
 ];
 

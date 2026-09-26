@@ -12,6 +12,7 @@ import time
 import unittest
 from http.cookiejar import CookieJar
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -772,6 +773,139 @@ class ApiTest(unittest.TestCase):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})
         self.assertEqual(status, 400)
+
+    def test_journal_records_actions(self):
+        table = self.free_table()
+        _, products = self.waiter.call("GET", "/api/products")
+        _, order = self.waiter.call("POST", "/api/orders", {"type": "dine_in", "table_id": table["id"]})
+        self.waiter.call("POST", f"/api/orders/{order['id']}/items", {"product_id": products[0]["id"], "qty": 2})
+        status, paid = self.cashier.call("POST", f"/api/orders/{order['id']}/pay", {"method": "cash"})
+        self.assertEqual(status, 200)
+
+        status, j = self.admin.call("GET", "/api/journal?category=sales")
+        self.assertEqual(status, 200)
+        sale = next(i for i in j["items"] if f"#{order['id']} " in i["summary"])
+        self.assertEqual(sale["title"], "Sotuv")
+        self.assertEqual(sale["user_name"], "Kassir")
+        _, detail = self.admin.call("GET", f"/api/journal/{sale['id']}")
+        fields = dict(map(tuple, detail["details"]["fields"]))
+        self.assertEqual(fields["To'lov usuli"], "Naqd")
+        self.assertEqual(detail["details"]["items"][0]["qty"], 2)
+
+        _, j = self.admin.call("GET", "/api/journal?category=orders&q=" + quote(products[0]["name"]))
+        self.assertTrue(any(i["title"] == "Buyurtmaga taom qo'shildi" for i in j["items"]))
+        # login ham yoziladi, parol esa hech qayerda saqlanmaydi
+        _, j = self.admin.call("GET", "/api/journal?category=auth")
+        self.assertTrue(j["items"])
+        self.admin.call("POST", "/api/users", {"username": "jurnal_test", "full_name": "Jurnal Test",
+                                               "role": "waiter", "password": "sirli-parol"})
+        _, j = self.admin.call("GET", "/api/journal?category=users")
+        _, detail = self.admin.call("GET", f"/api/journal/{j['items'][0]['id']}")
+        self.assertNotIn("sirli-parol", json.dumps(detail))
+        self.assertEqual(detail["details"]["request"]["password"], "•••")
+        # ruxsatsiz - yo'q
+        status, _ = self.cashier.call("GET", "/api/journal")
+        self.assertEqual(status, 403)
+
+    def test_journal_product_changes(self):
+        _, p = self.admin.call("POST", "/api/products", {"name": "Jurnal somsa", "price": 8000})
+        self.admin.call("PUT", f"/api/products/{p['id']}", {"name": "Jurnal somsa", "price": 9000})
+        self.admin.call("DELETE", f"/api/products/{p['id']}")
+        _, j = self.admin.call("GET", "/api/journal?q=Jurnal%20somsa")
+        titles = [i["title"] for i in j["items"]]
+        self.assertEqual(titles[:3], ["Mahsulot o'chirildi", "Mahsulot o'zgartirildi", "Mahsulot qo'shildi"])
+        self.assertIn("8 000 so'm → 9 000 so'm", j["items"][1]["summary"])
+        # xato bilan tugagan amal jurnalga yozilmaydi
+        status, _ = self.admin.call("POST", "/api/products", {"name": "", "price": 1})
+        self.assertEqual(status, 400)
+        _, after = self.admin.call("GET", "/api/journal?category=menu")
+        self.assertEqual(after["items"][0]["title"], "Mahsulot o'chirildi")
+
+    def test_telegram_integration(self):
+        import server
+        import telegram
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import parse_qs
+
+        sent = []
+
+        class FakeTelegram(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = parse_qs(self.rfile.read(int(self.headers["Content-Length"] or 0)).decode())
+                method = self.path.rsplit("/", 1)[-1]
+                if "/botBAD" in self.path or "000:" in self.path:
+                    result = {"ok": False, "description": "Unauthorized"}
+                elif method == "getMe":
+                    result = {"ok": True, "result": {"id": 1, "username": "cafe_test_bot", "first_name": "Cafe"}}
+                elif method == "getUpdates":
+                    result = {"ok": True, "result": [{"message": {"chat": {"id": 555111, "type": "private", "first_name": "Ali"}}}]}
+                else:
+                    sent.append(body)
+                    result = {"ok": True, "result": {}}
+                raw = json.dumps(result).encode()
+                self.send_response(200 if result["ok"] else 401)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeTelegram)
+        threading.Thread(target=fake.serve_forever, daemon=True).start()
+        old_api, telegram.API = telegram.API, f"http://127.0.0.1:{fake.server_address[1]}"
+        token = "123456789:AAH" + "x" * 32
+        try:
+            status, _ = self.cashier.call("GET", "/api/integrations/telegram")
+            self.assertEqual(status, 403)
+            status, bot = self.admin.call("POST", "/api/integrations/telegram/check", {"token": token})
+            self.assertEqual((status, bot["username"]), (200, "cafe_test_bot"))
+            status, err = self.admin.call("POST", "/api/integrations/telegram/check", {"token": "000:" + "y" * 30})
+            self.assertEqual(status, 502)
+            self.assertIn("noto'g'ri", err["error"])
+            _, chats = self.admin.call("POST", "/api/integrations/telegram/chats", {"token": token})
+            self.assertEqual(chats[0]["id"], 555111)
+            # chatsiz yoqib bo'lmaydi
+            status, _ = self.admin.call("PUT", "/api/integrations/telegram", {"enabled": True, "token": token, "chats": []})
+            self.assertEqual(status, 400)
+            status, cfg = self.admin.call("PUT", "/api/integrations/telegram", {
+                "enabled": True, "token": token, "chats": [{"id": 555111, "title": "Ali"}],
+                "categories": ["sales", "finance"]})
+            self.assertEqual(status, 200)
+            self.assertNotIn(token, json.dumps(cfg))  # token to'liq qaytarilmaydi
+            self.assertTrue(cfg["token_set"])
+            _, settings = self.admin.call("GET", "/api/settings")
+            self.assertNotIn(token, json.dumps(settings))
+            # token kiritilmasa - eskisi qoladi
+            status, cfg = self.admin.call("PUT", "/api/integrations/telegram", {
+                "enabled": True, "chats": cfg["chats"], "categories": ["sales", "finance"]})
+            self.assertEqual((status, cfg["token_set"]), (200, True))
+
+            status, res = self.admin.call("POST", "/api/integrations/telegram/test", {})
+            self.assertEqual(status, 200)
+            self.assertTrue(res[0]["ok"])
+            sent.clear()
+            _, types = self.admin.call("GET", "/api/finance/types")
+            ftype = next(t for t in types if t["direction"] == "in")
+            self.admin.call("POST", "/api/finance/entries", {"type_id": ftype["id"], "account": "cash",
+                                                             "amount": 77000, "comment": "Telegram sinov"})
+            self.admin.call("POST", "/api/categories", {"name": "Telegramga bormaydi"})  # menu tanlanmagan
+            for _ in range(50):
+                if sent:
+                    break
+                time.sleep(0.05)
+            telegram.notifier.queue.join()
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["chat_id"], ["555111"])
+            self.assertIn("77 000 so'm", sent[0]["text"][0])
+            self.assertIn("Telegram sinov", sent[0]["text"][0])
+        finally:
+            self.admin.call("PUT", "/api/integrations/telegram", {"enabled": False})
+            telegram.API = old_api
+            fake.shutdown()
+            fake.server_close()
+
+
 
 
 class PrintingTest(unittest.TestCase):

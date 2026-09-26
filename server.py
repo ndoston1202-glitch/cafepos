@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 from xml.etree import ElementTree
 
 import printing
+import telegram
 import xlsx
 from printing import PrintError
 
@@ -40,7 +41,8 @@ SESSION_DAYS = 7
 
 ROLES = ("admin", "cashier", "waiter", "cook")
 # Bo'limlarga kirish ruxsatlari
-PERMISSIONS = ("tables", "cashier", "kitchen", "reports", "menu", "crm", "finance", "halls", "printers", "users", "settings")
+PERMISSIONS = ("tables", "cashier", "kitchen", "reports", "menu", "crm", "finance", "halls", "printers", "users",
+               "settings", "journal", "integrations")
 ROLE_DEFAULTS = {
     "admin": PERMISSIONS,
     "cashier": ("tables", "cashier", "kitchen", "reports", "crm"),
@@ -222,6 +224,27 @@ CREATE TABLE IF NOT EXISTS balance_adjustments (
     comment TEXT,
     created_at TEXT NOT NULL,
     created_by INTEGER REFERENCES users(id)
+);
+-- Jurnal: barcha amallar (kim, qachon, nima). O'chirilmaydi.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    user_id INTEGER REFERENCES users(id),
+    user_name TEXT,
+    category TEXT NOT NULL,
+    action TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT,
+    details TEXT,
+    entity TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+-- Integratsiyalar (Telegram bot va boshqalar): sozlamalar JSON ko'rinishida
+CREATE TABLE IF NOT EXISTS integrations (
+    name TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    config TEXT,
+    updated_at TEXT
 );
 """
 
@@ -2081,6 +2104,672 @@ def network_info(conn, user, params, data, query):
 # ---------------------------------------------------------------- HTTP
 
 
+# ---------------------------------------------------------------- jurnal (barcha amallar tarixi)
+# Har bir o'zgartiruvchi so'rovdan keyin yoziladi: kim, qachon, nima qildi va batafsil ma'lumot.
+# Yozuvlar o'chirilmaydi va o'zgartirilmaydi.
+
+JOURNAL_CATEGORIES = {
+    "sales": "Sotuv",
+    "orders": "Buyurtmalar",
+    "finance": "Moliya",
+    "crm": "CRM",
+    "menu": "Mahsulotlar",
+    "users": "Xodimlar",
+    "settings": "Sozlamalar",
+    "auth": "Kirish",
+}
+# Telegramga standart yuboriladiganlar (buyurtmaga taom qo'shish kabi mayda amallarsiz)
+TELEGRAM_DEFAULT_CATEGORIES = ("sales", "finance", "crm", "menu", "users", "settings")
+ACCOUNT_NAMES = {"cash": "Naqd", "card": "Karta", "payme": "Payme", "click": "Click", "bank": "Hisob raqam",
+                 "debt": "Qarzga", "adjust": "Tuzatish"}
+DEBT_METHOD_NAMES = {"cash": "Naqd", "click": "Click", "terminal": "Terminal", "transfer": "Pul ko'chirish"}
+SECRET_FIELDS = {"password", "password_hash", "salt", "token", "image", "data", "logo"}
+
+
+def fmt_money(n):
+    return f"{int(n or 0):,} so'm".replace(",", " ")
+
+
+def one(conn, sql, *args):
+    row = conn.execute(sql, args).fetchone()
+    return dict(row) if row else {}
+
+
+def order_place(o):
+    if not o:
+        return ""
+    if o.get("type") == "takeaway":
+        return "Olib ketish"
+    name = o.get("table_name") or "Stol"
+    return f"{name} ({o['hall_name']})" if o.get("hall_name") else name
+
+
+def order_row(conn, order_id):
+    return one(conn, """SELECT o.*, t.name AS table_name, h.name AS hall_name, w.full_name AS waiter_name
+                        FROM orders o LEFT JOIN tables t ON t.id = o.table_id
+                        LEFT JOIN halls h ON h.id = t.hall_id LEFT JOIN users w ON w.id = o.waiter_id
+                        WHERE o.id = ?""", order_id)
+
+
+def change(label, old, new, fmt=str):
+    """Tahrirlashda: "Narxi: 30 000 → 35 000" (o'zgarmagan bo'lsa - None)."""
+    if old == new or new is None:
+        return None
+    return [label, f"{fmt(old) if old not in (None, '') else '—'} → {fmt(new)}"]
+
+
+def entry(title, summary="", fields=(), items=None, entity=None):
+    return {"title": title, "summary": summary, "fields": [f for f in fields if f and f[1] not in (None, "")],
+            "items": items, "entity": entity}
+
+
+# "before" - amaldan OLDINGI holat (o'chirish/tahrirlashda eski nomni ko'rsatish uchun)
+AUDIT_BEFORE = {
+    "update_category": lambda c, p, d: one(c, "SELECT * FROM categories WHERE id = ?", p[0]),
+    "delete_category": lambda c, p, d: one(c, "SELECT * FROM categories WHERE id = ?", p[0]),
+    "update_product": lambda c, p, d: one(c, """SELECT p.*, c.name AS category_name FROM products p
+                                               LEFT JOIN categories c ON c.id = p.category_id WHERE p.id = ?""", p[0]),
+    "delete_product": lambda c, p, d: one(c, "SELECT * FROM products WHERE id = ?", p[0]),
+    "save_settings": lambda c, p, d: get_settings(c),
+    "update_hall": lambda c, p, d: one(c, "SELECT * FROM halls WHERE id = ?", p[0]),
+    "delete_hall": lambda c, p, d: one(c, "SELECT * FROM halls WHERE id = ?", p[0]),
+    "update_table": lambda c, p, d: one(c, "SELECT * FROM tables WHERE id = ?", p[0]),
+    "delete_table": lambda c, p, d: one(c, "SELECT * FROM tables WHERE id = ?", p[0]),
+    "update_printer": lambda c, p, d: one(c, "SELECT * FROM printers WHERE id = ?", p[0]),
+    "delete_printer": lambda c, p, d: one(c, "SELECT * FROM printers WHERE id = ?", p[0]),
+    "update_item": lambda c, p, d: one(c, "SELECT * FROM order_items WHERE id = ?", p[1]),
+    "cancel_order": lambda c, p, d: order_row(c, p[0]),
+    "discard_order": lambda c, p, d: order_row(c, p[0]),
+    "cancel_sale": lambda c, p, d: order_row(c, p[0]),
+    "update_customer": lambda c, p, d: one(c, "SELECT * FROM customers WHERE id = ?", p[0]),
+    "pay_debt": lambda c, p, d: one(c, """SELECT d.*, c.name AS customer_name, c.phone FROM debts d
+                                         JOIN customers c ON c.id = d.customer_id WHERE d.id = ?""", p[0]),
+    "cancel_debt_payment": lambda c, p, d: one(c, """SELECT p.*, c.name AS customer_name FROM debt_payments p
+                                                    JOIN customers c ON c.id = p.customer_id WHERE p.id = ?""", p[0]),
+    "cancel_finance_entry": lambda c, p, d: one(c, """SELECT e.*, t.name AS type_name FROM finance_entries e
+                                                     JOIN finance_types t ON t.id = e.type_id WHERE e.id = ?""", p[0]),
+    "update_user": lambda c, p, d: one(c, "SELECT id, username, full_name, role, phone, active FROM users WHERE id = ?", p[0]),
+    "delete_user": lambda c, p, d: one(c, "SELECT id, username, full_name, role FROM users WHERE id = ?", p[0]),
+    "kitchen_ready": lambda c, p, d: one(c, "SELECT * FROM kitchen_tickets WHERE id = ?", p[0]),
+}
+
+
+def _a_product(ctx):
+    d, r = ctx.data, ctx.result
+    cat = one(ctx.conn, "SELECT name FROM categories WHERE id = ?", d.get("category_id")).get("name")
+    printer = one(ctx.conn, "SELECT name FROM printers WHERE id = ?", d.get("printer_id")).get("name")
+    return entry("Mahsulot qo'shildi", f"{d.get('name', '').strip()} · {fmt_money(d.get('price'))}", [
+        ["Nomi", d.get("name", "").strip()], ["Kategoriya", cat], ["Sotish narxi", fmt_money(d.get("price"))],
+        ["Tannarxi", fmt_money(d.get("cost") or 0)], ["Printer", printer], ["Rasm", "bor" if d.get("image") else None],
+    ], entity=f"product:{r.get('id')}")
+
+
+def _a_product_update(ctx):
+    b, d = ctx.before, ctx.data
+    cat = one(ctx.conn, "SELECT name FROM categories WHERE id = ?", d.get("category_id")).get("name")
+    fields = [
+        change("Nomi", b.get("name"), (d.get("name") or "").strip()),
+        change("Sotish narxi", b.get("price"), int(d.get("price") or 0), fmt_money),
+        change("Tannarxi", b.get("cost"), int(d.get("cost") or 0), fmt_money),
+        change("Kategoriya", b.get("category_name"), cat),
+        ["Rasm", "yangilandi" if d.get("image") else "olib tashlandi" if d.get("remove_image") else None],
+    ]
+    changed = [f for f in fields if f and f[1]]
+    return entry("Mahsulot o'zgartirildi", (d.get("name") or "").strip() + (
+        " · " + ", ".join(f"{f[0].lower()}: {f[1]}" for f in changed) if changed else ""), changed,
+        entity=f"product:{ctx.params[0]}")
+
+
+def _a_pay(ctx):
+    o = ctx.result
+    fields = [["Buyurtma", f"#{o['id']}"], ["Joy", order_place(o)], ["Ofitsiant", o.get("waiter_name")],
+              ["Taomlar summasi", fmt_money(o["subtotal"])],
+              ["Xizmat haqi", f"{fmt_money(o['service'])} ({o['service_percent']:g}%)" if o.get("service") else None],
+              ["Chegirma", fmt_money(o["discount"]) if o.get("discount") else None],
+              ["Jami", fmt_money(o["total"])], ["To'lov usuli", ACCOUNT_NAMES.get(o["payment_method"])]]
+    if o["payment_method"] == "debt":
+        debt = one(ctx.conn, """SELECT d.due_date, c.name, c.phone FROM debts d JOIN customers c ON c.id = d.customer_id
+                                WHERE d.order_id = ? ORDER BY d.id DESC""", o["id"])
+        fields += [["Mijoz", f"{debt.get('name', '')} {debt.get('phone', '')}".strip()], ["To'lov muddati", debt.get("due_date")]]
+    items = [{"name": i["name"], "qty": i["qty"], "price": i["price"]} for i in o["items"]]
+    return entry("Sotuv", f"Buyurtma #{o['id']} · {order_place(o)} · {fmt_money(o['total'])} · "
+                 f"{ACCOUNT_NAMES.get(o['payment_method'], o['payment_method'])}", fields, items, f"order:{o['id']}")
+
+
+def _a_add_item(ctx):
+    o = ctx.result
+    p = one(ctx.conn, "SELECT name, price FROM products WHERE id = ?", ctx.data.get("product_id"))
+    qty = int(ctx.data.get("qty") or 1)
+    return entry("Buyurtmaga taom qo'shildi", f"{p.get('name')} × {qty} · Buyurtma #{o['id']} · {order_place(o)}", [
+        ["Taom", p.get("name")], ["Soni", qty], ["Narxi", fmt_money(p.get("price"))],
+        ["Buyurtma", f"#{o['id']}"], ["Joy", order_place(o)], ["Buyurtma summasi", fmt_money(o["total"])],
+    ], entity=f"order:{o['id']}")
+
+
+def _a_update_item(ctx):
+    b, o, qty = ctx.before, ctx.result, int(ctx.data.get("qty") or 0)
+    title = "Buyurtmadan taom olib tashlandi" if qty == 0 else "Taom soni o'zgartirildi"
+    return entry(title, f"{b.get('name')}: {b.get('qty')} → {qty} · Buyurtma #{o['id']} · {order_place(o)}", [
+        ["Taom", b.get("name")], ["Soni", f"{b.get('qty')} → {qty}"], ["Buyurtma", f"#{o['id']}"],
+        ["Joy", order_place(o)], ["Oshxonaga yuborilgan", "ha" if (b.get("printed_qty") or b.get("kds_qty")) else "yo'q"],
+    ], entity=f"order:{o['id']}")
+
+
+def _a_cancel_order(ctx, title="Buyurtma bekor qilindi"):
+    b = ctx.before
+    items = rows(ctx.conn.execute("SELECT name, qty, price FROM order_items WHERE order_id = ? AND qty > 0", (b.get("id"),)))
+    total = sum(i["qty"] * i["price"] for i in items)
+    return entry(title, f"Buyurtma #{b.get('id')} · {order_place(b)} · {fmt_money(total)}", [
+        ["Buyurtma", f"#{b.get('id')}"], ["Joy", order_place(b)], ["Ofitsiant", b.get("waiter_name")],
+        ["Summa", fmt_money(total)], ["Ochilgan", b.get("created_at")],
+    ], items, f"order:{b.get('id')}")
+
+
+def _a_cancel_sale(ctx):
+    b = ctx.before
+    items = rows(ctx.conn.execute("SELECT name, qty, price FROM order_items WHERE order_id = ? AND qty > 0", (b.get("id"),)))
+    return entry("Savdo bekor qilindi (pul qaytarildi)",
+                 f"Buyurtma #{b.get('id')} · {fmt_money(b.get('total'))} · {ACCOUNT_NAMES.get(b.get('payment_method'), '')}", [
+        ["Buyurtma", f"#{b.get('id')}"], ["Joy", order_place(b)], ["Summa", fmt_money(b.get("total"))],
+        ["To'lov usuli", ACCOUNT_NAMES.get(b.get("payment_method"))], ["Sotilgan vaqti", b.get("closed_at")],
+        ["Sabab", (ctx.data.get("reason") or "").strip()],
+    ], items, f"order:{b.get('id')}")
+
+
+def _a_kitchen_print(ctx):
+    o = ctx.result
+    if not o.get("printed"):
+        return None
+    return entry("Oshxonaga chop etildi", f"Buyurtma #{o['id']} · {order_place(o)} · {', '.join(o['printed'])}", [
+        ["Buyurtma", f"#{o['id']}"], ["Joy", order_place(o)], ["Printer", ", ".join(o["printed"])],
+        ["Xatolar", "; ".join(o.get("errors") or [])],
+    ], entity=f"order:{o['id']}")
+
+
+def _a_kitchen_ready(ctx):
+    t = ctx.before
+    o = order_row(ctx.conn, t.get("order_id"))
+    lines = json.loads(t.get("lines") or "[]")
+    return entry("Oshxona: taom tayyor", f"Buyurtma #{o.get('id')} · {order_place(o)}", [
+        ["Buyurtma", f"#{o.get('id')}"], ["Joy", order_place(o)]],
+        [{"name": l["name"], "qty": l["qty"]} for l in lines], f"order:{o.get('id')}")
+
+
+def _a_finance_entry(ctx):
+    d = ctx.data
+    t = one(ctx.conn, "SELECT name, direction FROM finance_types WHERE id = ?", d.get("type_id"))
+    supplier = one(ctx.conn, "SELECT name FROM suppliers WHERE id = ?", d.get("supplier_id")).get("name")
+    kind = "Kirim" if t.get("direction") == "in" else "Chiqim"
+    return entry(f"{kind}: {t.get('name')}", f"{fmt_money(d.get('amount'))} · {ACCOUNT_NAMES.get(d.get('account'))}"
+                 + (f" · {supplier}" if supplier else ""), [
+        ["Turi", kind], ["Tranzaksiya", t.get("name")], ["Summa", fmt_money(d.get("amount"))],
+        ["Hisob", ACCOUNT_NAMES.get(d.get("account"))], ["Ta'minotchi", supplier], ["Izoh", (d.get("comment") or "").strip()],
+    ], entity=f"finance:{ctx.result.get('id')}")
+
+
+def _a_cancel_finance(ctx):
+    b = ctx.before
+    kind = "Kirim" if b.get("direction") == "in" else "Chiqim"
+    return entry("Tranzaksiya bekor qilindi", f"{kind}: {b.get('type_name')} · {fmt_money(b.get('amount'))}", [
+        ["Tranzaksiya", f"{kind}: {b.get('type_name')}"], ["Summa", fmt_money(b.get("amount"))],
+        ["Hisob", ACCOUNT_NAMES.get(b.get("account"))], ["Yaratilgan", b.get("created_at")],
+        ["Sabab", (ctx.data.get("reason") or "").strip()],
+    ], entity=f"finance:{b.get('id')}")
+
+
+def _a_customer(ctx, title):
+    c = ctx.result
+    fields = [["Ismi", c.get("name")], ["Telefon", c.get("phone")], ["Jinsi", {"m": "Erkak", "f": "Ayol"}.get(c.get("gender"))]]
+    if ctx.before:
+        fields = [change("Ismi", ctx.before.get("name"), c.get("name")), change("Telefon", ctx.before.get("phone"), c.get("phone")),
+                  change("Jinsi", {"m": "Erkak", "f": "Ayol"}.get(ctx.before.get("gender")),
+                         {"m": "Erkak", "f": "Ayol"}.get(c.get("gender")))]
+    return entry(title, f"{c.get('name')} · {c.get('phone')}", fields, entity=f"customer:{c.get('id')}")
+
+
+def _a_add_debt(ctx):
+    c = one(ctx.conn, "SELECT * FROM customers WHERE id = ?", ctx.params[0])
+    d = ctx.data
+    return entry("Mijozga qarz yozildi", f"{c.get('name')} · {fmt_money(d.get('amount'))} · muddati {d.get('due_date')}", [
+        ["Mijoz", f"{c.get('name')} {c.get('phone')}"], ["Summa", fmt_money(d.get("amount"))],
+        ["To'lov muddati", d.get("due_date")], ["Izoh", (d.get("comment") or "").strip()],
+    ], entity=f"customer:{c.get('id')}")
+
+
+def _a_pay_debt(ctx):
+    b, r = ctx.before, ctx.result
+    amount = one(ctx.conn, "SELECT amount FROM debt_payments WHERE debt_id = ? ORDER BY id DESC", b["id"]).get("amount")
+    return entry("Qarz to'landi (kirim)", f"{b.get('customer_name')} · {fmt_money(amount)} · "
+                 f"{DEBT_METHOD_NAMES.get(ctx.data.get('method'))}", [
+        ["Mijoz", f"{b.get('customer_name')} {b.get('phone')}"], ["To'landi", fmt_money(amount)],
+        ["To'lov usuli", DEBT_METHOD_NAMES.get(ctx.data.get("method"))], ["Hisobga tushdi", ACCOUNT_NAMES.get(r.get("account"))],
+        ["Qarz qoldig'i", fmt_money(r.get("remaining"))],
+    ], entity=f"customer:{b.get('customer_id')}")
+
+
+def _a_cancel_debt_payment(ctx):
+    b = ctx.before
+    return entry("Qarz to'lovi bekor qilindi", f"{b.get('customer_name')} · {fmt_money(b.get('amount'))}", [
+        ["Mijoz", b.get("customer_name")], ["Summa", fmt_money(b.get("amount"))],
+        ["To'lov usuli", DEBT_METHOD_NAMES.get(b.get("method"))], ["To'langan vaqti", b.get("created_at")],
+        ["Sabab", (ctx.data.get("reason") or "").strip()],
+    ], entity=f"customer:{b.get('customer_id')}")
+
+
+def _a_balance(ctx, what):
+    r, d = ctx.result, ctx.data
+    if what == "account":
+        name, title = ACCOUNT_NAMES.get(d.get("account")), "Kassa balansi o'rnatildi"
+    elif what == "customer":
+        name = one(ctx.conn, "SELECT name FROM customers WHERE id = ?", d.get("customer_id")).get("name")
+        title = "Mijoz balansi (qarzi) o'rnatildi"
+    else:
+        name = one(ctx.conn, "SELECT name FROM suppliers WHERE id = ?", d.get("supplier_id")).get("name")
+        title = "Ta'minotchi balansi o'rnatildi"
+    return entry(title, f"{name}: {fmt_money(r['old'])} → {fmt_money(r['new'])}", [
+        ["Kimga", name], ["Eski balans", fmt_money(r["old"])], ["Yangi balans", fmt_money(r["new"])],
+        ["Farq", ("+" if r["new"] > r["old"] else "−") + fmt_money(abs(r["new"] - r["old"]))],
+        ["Izoh", (d.get("comment") or "").strip()],
+    ])
+
+
+def _a_import(ctx):
+    r = ctx.result
+    what = "Mahsulotlar" if ctx.params[0] == "products" else "Mijozlar"
+    return dict(category="menu" if ctx.params[0] == "products" else "crm", **entry(f"{what} fayldan import qilindi",
+                 f"{r['created']} ta yangi, {r['updated']} ta yangilandi" + (f", {len(r['errors'])} ta xato" if r["errors"] else ""), [
+        ["Fayl", ctx.data.get("file_name")], ["Yangi qo'shildi", r["created"]], ["Yangilandi", r["updated"]],
+        ["Xatolar", "; ".join(f"{e['row']}-qator: {e['message']}" for e in r["errors"][:20])],
+    ]))
+
+
+def _a_user(ctx, title):
+    d = ctx.data
+    name = f"{(d.get('first_name') or '').strip()} {(d.get('last_name') or '').strip()}".strip() or d.get("full_name")
+    fields = [["Xodim", name], ["Login", d.get("username") or ctx.before.get("username")],
+              ["Lavozim", {"admin": "Administrator", "cashier": "Kassir", "waiter": "Ofitsiant", "cook": "Oshpaz"}.get(d.get("role"))],
+              ["Telefon", d.get("phone")]]
+    if isinstance(d.get("permissions"), list) and d.get("role") != "admin":
+        fields.append(["Ruxsatlar", ", ".join(PERMISSION_NAMES.get(p, p) for p in d["permissions"]) or "yo'q"])
+    if ctx.before and d.get("password"):
+        fields.append(["Parol", "o'zgartirildi"])
+    if ctx.before and d.get("active") is False:
+        fields.append(["Holati", "bloklandi"])
+    return entry(title, f"{name} ({fields[1][1]})", fields, entity=f"user:{ctx.params[0] if ctx.params else ctx.result.get('id')}")
+
+
+def _a_named(title, table_label, source="data"):
+    """Oddiy nomli ob'ektlar: kategoriya, zal, stol, printer."""
+    def build(ctx):
+        if source == "before":
+            name = ctx.before.get("name")
+            return entry(title, name, [[table_label, name]])
+        new = (ctx.data.get("name") or "").strip()
+        old = ctx.before.get("name") if ctx.before else None
+        fields = [[table_label, new]]
+        if old is not None and old != new:
+            fields = [[table_label, f"{old} → {new}"]]
+        for key, label in (("service_percent", "Xizmat haqi, %"), ("seats", "O'rinlar"), ("address", "Manzil"),
+                           ("kind", "Turi"), ("width", "Qog'oz kengligi")):
+            if ctx.data.get(key) not in (None, ""):
+                fields.append([label, ctx.data[key]])
+        return entry(title, new if old in (None, new) else f"{old} → {new}", fields)
+    return build
+
+
+def _a_settings(ctx):
+    b, s = ctx.before, ctx.result
+    fields = [change("Kafe nomi", b.get("cafe_name"), s.get("cafe_name")),
+              change("Xizmat haqi", b.get("service_percent"), s.get("service_percent"), lambda v: f"{v:g}%")]
+    fields = [f for f in fields if f]
+    if not fields:
+        return None
+    return entry("Sozlamalar o'zgartirildi", ", ".join(f"{f[0]}: {f[1]}" for f in fields), fields)
+
+
+PERMISSION_NAMES = {
+    "tables": "Stollar", "cashier": "Kassa", "kitchen": "Oshxona", "reports": "Hisobot", "menu": "Menyu",
+    "crm": "CRM", "finance": "Moliya", "halls": "Zallar", "printers": "Printerlar", "users": "Xodimlar",
+    "settings": "Sozlamalar", "journal": "Jurnal", "integrations": "Integratsiyalar",
+}
+
+# handler nomi -> (kategoriya, yozuv yaratuvchi). None qaytarsa - jurnalga yozilmaydi.
+AUDIT = {
+    "create_category": ("menu", _a_named("Kategoriya qo'shildi", "Kategoriya")),
+    "update_category": ("menu", _a_named("Kategoriya o'zgartirildi", "Kategoriya")),
+    "delete_category": ("menu", _a_named("Kategoriya o'chirildi", "Kategoriya", "before")),
+    "create_product": ("menu", _a_product),
+    "update_product": ("menu", _a_product_update),
+    "delete_product": ("menu", _a_named("Mahsulot o'chirildi", "Mahsulot", "before")),
+    "save_settings": ("settings", _a_settings),
+    "create_hall": ("settings", _a_named("Zal qo'shildi", "Zal")),
+    "update_hall": ("settings", _a_named("Zal o'zgartirildi", "Zal")),
+    "delete_hall": ("settings", _a_named("Zal o'chirildi", "Zal", "before")),
+    "create_table": ("settings", _a_named("Stol qo'shildi", "Stol")),
+    "update_table": ("settings", _a_named("Stol o'zgartirildi", "Stol")),
+    "delete_table": ("settings", _a_named("Stol o'chirildi", "Stol", "before")),
+    "create_printer": ("settings", _a_named("Printer qo'shildi", "Printer")),
+    "update_printer": ("settings", _a_named("Printer o'zgartirildi", "Printer")),
+    "delete_printer": ("settings", _a_named("Printer o'chirildi", "Printer", "before")),
+    "add_item": ("orders", _a_add_item),
+    "update_item": ("orders", _a_update_item),
+    "discard_order": ("orders", lambda ctx: None if ctx.result.get("deleted") else _a_cancel_order(ctx)),
+    "kitchen_print": ("orders", _a_kitchen_print),
+    "kitchen_send": ("orders", lambda ctx: entry(
+        "Oshxona ekraniga yuborildi", f"Buyurtma #{ctx.result['id']} · {order_place(ctx.result)}",
+        [["Buyurtma", f"#{ctx.result['id']}"], ["Joy", order_place(ctx.result)]],
+        [{"name": i["name"], "qty": i["qty"]} for i in ctx.result["items"]], f"order:{ctx.result['id']}")),
+    "kitchen_ready": ("orders", _a_kitchen_ready),
+    "pay_order": ("sales", _a_pay),
+    "cancel_order": ("sales", _a_cancel_order),
+    "cancel_sale": ("sales", _a_cancel_sale),
+    "create_finance_type": ("finance", lambda ctx: entry(
+        "Tranzaksiya turi yaratildi", f"{clean_name(ctx.data.get('name'))} ({'Kirim' if ctx.data.get('direction') == 'in' else 'Chiqim'})",
+        [["Nomi", clean_name(ctx.data.get("name"))], ["Yo'nalishi", "Kirim" if ctx.data.get("direction") == "in" else "Chiqim"]])),
+    "create_finance_entry": ("finance", _a_finance_entry),
+    "cancel_finance_entry": ("finance", _a_cancel_finance),
+    "create_supplier": ("finance", lambda ctx: entry(
+        "Ta'minotchi qo'shildi", ctx.result.get("name"), [["Nomi", ctx.result.get("name")], ["Telefon", ctx.result.get("phone")]])),
+    "set_account_balance": ("finance", lambda ctx: _a_balance(ctx, "account")),
+    "set_customer_balance": ("finance", lambda ctx: _a_balance(ctx, "customer")),
+    "set_supplier_balance": ("finance", lambda ctx: _a_balance(ctx, "supplier")),
+    "create_customer": ("crm", lambda ctx: _a_customer(ctx, "Mijoz qo'shildi")),
+    "update_customer": ("crm", lambda ctx: _a_customer(ctx, "Mijoz ma'lumotlari o'zgartirildi")),
+    "add_debt": ("crm", _a_add_debt),
+    "pay_debt": ("crm", _a_pay_debt),
+    "cancel_debt_payment": ("crm", _a_cancel_debt_payment),
+    "import_file": ("menu", _a_import),
+    "create_user": ("users", lambda ctx: _a_user(ctx, "Xodim qo'shildi")),
+    "update_user": ("users", lambda ctx: _a_user(ctx, "Xodim ma'lumotlari o'zgartirildi")),
+    "delete_user": ("users", lambda ctx: entry(
+        "Xodim bloklandi", f"{ctx.before.get('full_name')} ({ctx.before.get('username')})",
+        [["Xodim", ctx.before.get("full_name")], ["Login", ctx.before.get("username")]], entity=f"user:{ctx.params[0]}")),
+    "save_telegram": ("settings", lambda ctx: entry(
+        "Telegram bot sozlamalari saqlandi", "yoqildi" if ctx.result.get("enabled") else "o'chirildi",
+        [["Holati", "yoqilgan" if ctx.result.get("enabled") else "o'chirilgan"],
+         ["Chatlar", ", ".join(c.get("title") or str(c["id"]) for c in ctx.result.get("chats", []))],
+         ["Yuboriladigan bo'limlar", ", ".join(JOURNAL_CATEGORIES.get(c, c) for c in ctx.result.get("categories", []))],
+         ["Token", "yangilandi" if ctx.data.get("token") else None]])),
+}
+
+
+class AuditContext:
+    def __init__(self, conn, user, params, data, result, before):
+        self.conn, self.user, self.params, self.data, self.result, self.before = conn, user, params, data, result, before or {}
+
+
+def clean_request(data):
+    """Jurnalga yoziladigan so'rov ma'lumoti - parol, rasm, fayl kabi narsalarsiz."""
+    out = {}
+    for k, v in (data or {}).items():
+        if k in SECRET_FIELDS or (isinstance(v, str) and v.startswith("data:")):
+            if v:
+                out[k] = "•••"
+            continue
+        out[k] = v
+    return out
+
+
+def write_journal(conn, user, category, rec, action, request=None):
+    details = {"fields": rec["fields"], "items": rec.get("items"), "request": request}
+    cur = conn.execute(
+        """INSERT INTO audit_log (created_at, user_id, user_name, category, action, title, summary, details, entity)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (now(), user["id"], user["full_name"], category, action, rec["title"], rec["summary"],
+         json.dumps(details, ensure_ascii=False, default=str), rec.get("entity")),
+    )
+    return cur.lastrowid
+
+
+def audit(conn, user, fn, params, data, result, before):
+    """Amal muvaffaqiyatli bo'lgandan keyin jurnalga yozadi. Telegram uchun xabar matnini qaytaradi."""
+    spec = AUDIT.get(fn.__name__)
+    if not spec:
+        return None
+    category, build = spec
+    try:
+        conn.execute("SAVEPOINT audit")
+        rec = build(AuditContext(conn, user, params, data, result if isinstance(result, dict) else {}, before))
+        if not rec:
+            conn.execute("RELEASE audit")
+            return None
+        category = rec.pop("category", None) or category
+        write_journal(conn, user, category, rec, fn.__name__, clean_request(data))
+        conn.execute("RELEASE audit")
+    except Exception as e:  # jurnal xatosi asosiy amalni buzmasin
+        conn.execute("ROLLBACK TO audit")
+        conn.execute("RELEASE audit")
+        sys.stderr.write(f"[{now()}] Jurnalga yozib bo'lmadi ({fn.__name__}): {e!r}\n")
+        return None
+    return telegram_message(conn, user, category, rec)
+
+
+# --- integratsiyalar (Telegram bot va kelajakdagilar)
+
+
+def get_integration(conn, name):
+    row = conn.execute("SELECT * FROM integrations WHERE name = ?", (name,)).fetchone()
+    config = {}
+    if row:
+        try:
+            config = json.loads(row["config"] or "{}")
+        except ValueError:
+            config = {}
+    return bool(row and row["enabled"]), config
+
+
+def save_integration(conn, name, enabled, config):
+    conn.execute(
+        """INSERT INTO integrations (name, enabled, config, updated_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(name) DO UPDATE SET enabled = excluded.enabled, config = excluded.config,
+                                           updated_at = excluded.updated_at""",
+        (name, 1 if enabled else 0, json.dumps(config, ensure_ascii=False), now()),
+    )
+
+
+def html_escape(text):
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def telegram_text(conn, user, category, rec, created_at=None):
+    cafe = get_settings(conn)["cafe_name"]
+    emoji = {"sales": "🧾", "orders": "🍽", "finance": "💰", "crm": "👥", "menu": "📦", "users": "🧑‍💼",
+             "settings": "⚙️", "auth": "🔑"}.get(category, "📌")
+    lines = [f"{emoji} <b>{html_escape(rec['title'])}</b>"]
+    if rec.get("summary"):
+        lines.append(html_escape(rec["summary"]))
+    for i in (rec.get("items") or [])[:30]:
+        price = f" — {fmt_money(i['price'] * i['qty'])}" if i.get("price") is not None else ""
+        lines.append(f"  • {html_escape(i['name'])} × {i['qty']}{price}")
+    extra = [f for f in rec.get("fields", []) if f[0] in ("Chegirma", "Mijoz", "To'lov muddati", "Ta'minotchi", "Izoh", "Sabab")]
+    for label, value in extra:
+        if value and str(value) not in (rec.get("summary") or ""):
+            lines.append(f"{html_escape(label)}: {html_escape(value)}")
+    lines.append(f"\n👤 {html_escape(user['full_name'])} · 🕒 {created_at or now()}")
+    lines.append(f"🏷 {html_escape(JOURNAL_CATEGORIES.get(category, category))} · {html_escape(cafe)}")
+    return "\n".join(lines)
+
+
+def telegram_message(conn, user, category, rec):
+    enabled, cfg = get_integration(conn, "telegram")
+    if not enabled or not cfg.get("token") or not cfg.get("chats"):
+        return None
+    if category not in cfg.get("categories", TELEGRAM_DEFAULT_CATEGORIES):
+        return None
+    return cfg["token"], [c["id"] for c in cfg["chats"]], telegram_text(conn, user, category, rec)
+
+
+def mask_token(token):
+    if not token:
+        return ""
+    return token[:6] + "•" * 6 + token[-4:] if len(token) > 12 else "•" * len(token)
+
+
+def telegram_public(conn):
+    enabled, cfg = get_integration(conn, "telegram")
+    return {
+        "enabled": enabled,
+        "token_set": bool(cfg.get("token")),
+        "token_hint": mask_token(cfg.get("token")),
+        "bot": cfg.get("bot"),
+        "chats": cfg.get("chats", []),
+        "categories": cfg.get("categories", list(TELEGRAM_DEFAULT_CATEGORIES)),
+        "all_categories": JOURNAL_CATEGORIES,
+        "status": {"last_ok": telegram.notifier.last_ok, "last_error": telegram.notifier.last_error,
+                   "sent": telegram.notifier.sent},
+    }
+
+
+@route("GET", "/api/integrations", ("integrations",))
+def list_integrations(conn, user, params, data, query):
+    enabled, cfg = get_integration(conn, "telegram")
+    return [{"key": "telegram", "enabled": enabled, "configured": bool(cfg.get("token") and cfg.get("chats"))}]
+
+
+@route("GET", "/api/integrations/telegram", ("integrations",))
+def get_telegram(conn, user, params, data, query):
+    return telegram_public(conn)
+
+
+def parse_chats(value):
+    if not isinstance(value, list):
+        raise ApiError(400, "Chatlar ro'yxat bo'lishi kerak")
+    chats = []
+    for c in value:
+        if not isinstance(c, dict):
+            c = {"id": c}
+        chat_id = str(c.get("id", "")).strip()
+        if not re.fullmatch(r"-?\d{3,20}|@[A-Za-z0-9_]{4,64}", chat_id):
+            raise ApiError(400, f"Chat ID noto'g'ri: {chat_id or 'bo`sh'}. Raqam (masalan 123456789 yoki -100...) bo'lsin")
+        if chat_id not in [x["id"] for x in chats]:
+            chats.append({"id": chat_id, "title": str(c.get("title") or "").strip()[:100]})
+    return chats
+
+
+@route("PUT", "/api/integrations/telegram", ("integrations",))
+def save_telegram(conn, user, params, data, query):
+    _, cfg = get_integration(conn, "telegram")
+    token = (data.get("token") or "").strip()
+    if token:
+        if not re.fullmatch(r"\d{5,15}:[A-Za-z0-9_-]{20,100}", token):
+            raise ApiError(400, "Bot tokeni noto'g'ri ko'rinishda. BotFather bergan tokenni to'liq nusxalang")
+        if token != cfg.get("token"):
+            cfg["bot"] = data.get("bot") if isinstance(data.get("bot"), dict) else None
+        cfg["token"] = token
+    elif isinstance(data.get("bot"), dict):
+        cfg["bot"] = data["bot"]
+    if "chats" in data:
+        cfg["chats"] = parse_chats(data["chats"])
+    if "categories" in data:
+        if not isinstance(data["categories"], list):
+            raise ApiError(400, "Bo'limlar ro'yxat bo'lishi kerak")
+        cfg["categories"] = [c for c in JOURNAL_CATEGORIES if c in data["categories"]]
+    enabled = bool(data.get("enabled"))
+    if enabled and not cfg.get("token"):
+        raise ApiError(400, "Avval bot tokenini kiriting")
+    if enabled and not cfg.get("chats"):
+        raise ApiError(400, "Xabar boradigan kamida bitta chat qo'shing")
+    save_integration(conn, "telegram", enabled, cfg)
+    return telegram_public(conn)
+
+
+def telegram_token(conn, data):
+    token = (data.get("token") or "").strip()
+    if not token:
+        token = get_integration(conn, "telegram")[1].get("token")
+    if not token:
+        raise ApiError(400, "Bot tokenini kiriting")
+    return token
+
+
+def deferred_telegram(fn):
+    """Telegram so'rovi internetni kutadi - baza qulfidan tashqarida bajariladi."""
+    def run():
+        try:
+            return fn()
+        except telegram.TelegramError as e:
+            raise ApiError(502, str(e))
+    return Deferred(run)
+
+
+@route("POST", "/api/integrations/telegram/check", ("integrations",))
+def check_telegram(conn, user, params, data, query):
+    token = telegram_token(conn, data)
+    return deferred_telegram(lambda: {
+        k: v for k, v in telegram.get_me(token).items() if k in ("id", "username", "first_name")})
+
+
+@route("POST", "/api/integrations/telegram/chats", ("integrations",))
+def find_telegram_chats(conn, user, params, data, query):
+    token = telegram_token(conn, data)
+    return deferred_telegram(lambda: telegram.find_chats(token))
+
+
+@route("POST", "/api/integrations/telegram/test", ("integrations",))
+def test_telegram(conn, user, params, data, query):
+    token = telegram_token(conn, data)
+    chats = parse_chats(data["chats"]) if "chats" in data else get_integration(conn, "telegram")[1].get("chats", [])
+    if not chats:
+        raise ApiError(400, "Avval chat qo'shing")
+    text = telegram_text(conn, user, "settings", entry(
+        "✅ Sinov xabari", "CafePOS jurnali shu chatga keladi: sotuvlar, kirim-chiqim, qarzlar va boshqalar."))
+
+    def run():
+        results = []
+        for c in chats:
+            try:
+                telegram.send_message(token, c["id"], text)
+                results.append({"id": c["id"], "title": c.get("title"), "ok": True})
+            except telegram.TelegramError as e:
+                results.append({"id": c["id"], "title": c.get("title"), "ok": False, "error": str(e)})
+        if not any(r["ok"] for r in results):
+            raise ApiError(502, "; ".join(r["error"] for r in results))
+        return results
+    return Deferred(run)
+
+
+# --- jurnal sahifasi
+
+
+@route("GET", "/api/journal", ("journal",))
+def list_journal(conn, user, params, data, query):
+    q = lambda k: (query.get(k, [""])[0] or "").strip()
+    today = datetime.now().date().isoformat()
+    date_from, date_to = q("from") or today, q("to") or today
+    where, args = ["j.created_at >= ?", "j.created_at < date(?, '+1 day')"], [date_from, date_to]
+    if q("user_id"):
+        where.append("j.user_id = ?")
+        args.append(to_int(q("user_id"), "user_id"))
+    if q("category"):
+        where.append("j.category = ?")
+        args.append(q("category"))
+    if q("q"):
+        where.append("(j.title LIKE ? OR j.summary LIKE ? OR j.user_name LIKE ?)")
+        args += [f"%{q('q')}%"] * 3
+    limit = min(to_int(q("limit") or 200, "limit", 1), 1000)
+    offset = to_int(q("offset") or 0, "offset", 0)
+    sql_where = " WHERE " + " AND ".join(where)
+    total = conn.execute(f"SELECT COUNT(*) FROM audit_log j{sql_where}", args).fetchone()[0]
+    items = rows(conn.execute(
+        f"""SELECT j.id, j.created_at, j.user_id, j.user_name, j.category, j.action, j.title, j.summary
+            FROM audit_log j{sql_where} ORDER BY j.id DESC LIMIT ? OFFSET ?""", args + [limit, offset]))
+    users = rows(conn.execute("SELECT id, full_name FROM users ORDER BY active DESC, full_name"))
+    return {"items": items, "total": total, "from": date_from, "to": date_to,
+            "users": users, "categories": JOURNAL_CATEGORIES}
+
+
+@route("GET", r"/api/journal/(\d+)", ("journal",))
+def journal_detail(conn, user, params, data, query):
+    row = one(conn, """SELECT j.*, u.username, u.role FROM audit_log j LEFT JOIN users u ON u.id = j.user_id
+                       WHERE j.id = ?""", params[0])
+    if not row:
+        raise ApiError(404, "Yozuv topilmadi")
+    row["details"] = json.loads(row["details"] or "{}")
+    row["category_name"] = JOURNAL_CATEGORIES.get(row["category"], row["category"])
+    return row
+
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CafePOS/1.0"
 
@@ -2184,6 +2873,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET":
                 return self.send_static(url.path)
             return self.send_json(404, {"error": "Topilmadi"})
+        self.telegram_out = None
         try:
             data = self.read_json() if method in ("POST", "PUT") else {}
             with db_lock:
@@ -2194,6 +2884,8 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     conn.rollback()
                     raise
+            if self.telegram_out:  # faqat saqlangan (commit) amallar Telegramga boradi
+                telegram.notifier.send(*self.telegram_out)
             status, payload, headers = result
             if isinstance(payload, Deferred):
                 payload = payload.fn()
@@ -2228,7 +2920,13 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if perms and not set(perms) & set(user["permissions"]):
                 raise ApiError(403, "Bu bo'limga ruxsatingiz yo'q")
-            return 200, fn(conn, user, m.groups(), data, query), None
+            if method == "GET":
+                return 200, fn(conn, user, m.groups(), data, query), None
+            before_fn = AUDIT_BEFORE.get(fn.__name__)
+            before = before_fn(conn, m.groups(), data) if before_fn else None
+            result = fn(conn, user, m.groups(), data, query)
+            self.telegram_out = audit(conn, user, fn, m.groups(), data, result, before)
+            return 200, result, None
         raise ApiError(405 if path_matched else 404, "Topilmadi")
 
     def login(self, conn, data):
@@ -2247,7 +2945,16 @@ class Handler(BaseHTTPRequestHandler):
             "INSERT INTO sessions (token, user_id, expires_at) VALUES (?,?,?)", (token, row["id"], expires)
         )
         cookie = f"sid={token}; Path=/; Max-Age={SESSION_DAYS * 86400}; HttpOnly; SameSite=Strict"
-        return 200, public_user(row), {"Set-Cookie": cookie}
+        user = public_user(row)
+        agent = self.headers.get("User-Agent", "")
+        device = ("Android ilova" if "CafePOS" in agent else "iPhone/iPad" if re.search(r"iPhone|iPad", agent)
+                  else "Android" if "Android" in agent else "Kompyuter")
+        rec = entry("Tizimga kirdi", f"{user['full_name']} ({user['username']}) · {device}",
+                    [["Xodim", user["full_name"]], ["Login", user["username"]], ["Qurilma", device],
+                     ["IP manzil", self.client_address[0]]])
+        write_journal(conn, user, "auth", rec, "login")
+        self.telegram_out = telegram_message(conn, user, "auth", rec)
+        return 200, user, {"Set-Cookie": cookie}
 
 
 def make_server(port=PORT, host="0.0.0.0"):
