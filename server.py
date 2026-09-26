@@ -171,6 +171,10 @@ MIGRATIONS = [
     # Yopilgan buyurtmaning xizmat haqi (to'lov paytida muzlatiladi)
     ("orders", "service_percent", "REAL NOT NULL DEFAULT 0"),
     ("orders", "service", "INTEGER NOT NULL DEFAULT 0"),
+    # Savdo bekor qilinsa (pul qaytarildi): status = 'refunded'
+    ("orders", "refunded_at", "TEXT"),
+    ("orders", "refunded_by", "INTEGER REFERENCES users(id)"),
+    ("orders", "refund_reason", "TEXT"),
     ("users", "first_name", "TEXT"),
     ("users", "last_name", "TEXT"),
     ("users", "phone", "TEXT"),
@@ -1103,6 +1107,22 @@ def cancel_finance_entry(conn, user, params, data, query):
     return {"ok": True}
 
 
+@route("POST", r"/api/finance/sales/(\d+)/cancel", ("finance",))
+def cancel_sale(conn, user, params, data, query):
+    """Savdoni bekor qilish (pulni qaytarish): buyurtma 'refunded' bo'ladi - tushum va balansdan chiqadi.
+    Buyurtma o'chirilmaydi, tarixda qoladi."""
+    order = conn.execute("SELECT status FROM orders WHERE id = ?", (params[0],)).fetchone()
+    if not order:
+        raise ApiError(404, "Buyurtma topilmadi")
+    if order["status"] != "paid":
+        raise ApiError(409, "Bu savdo allaqachon bekor qilingan")
+    conn.execute(
+        "UPDATE orders SET status = 'refunded', refunded_at = ?, refunded_by = ?, refund_reason = ? WHERE id = ?",
+        (now(), user["id"], (data.get("reason") or "").strip() or None, params[0]),
+    )
+    return {"ok": True}
+
+
 @route("GET", "/api/finance/entries", ("finance",))
 def list_finance_entries(conn, user, params, data, query):
     today = datetime.now().date()
@@ -1129,11 +1149,16 @@ def list_finance_entries(conn, user, params, data, query):
                WHERE e.created_at BETWEEN ? AND ?""", rng)]
     if source in ("all", "sales") and direction in ("", "in"):
         # Savdo tushumlari - avtomatik kirim (buyurtmani bekor qilish Savdo bo'limida)
-        entries += [dict(r, source="sale", direction="in", status="done", type_name="Savdo") for r in conn.execute(
+        entries += [dict(r, source="sale", direction="in", type_name="Savdo") for r in conn.execute(
             """SELECT o.id, o.payment_method AS account, o.total AS amount, o.closed_at AS created_at,
-                      'Buyurtma #' || o.id AS comment, u.full_name AS user_name
-               FROM orders o LEFT JOIN users u ON u.id = o.cashier_id
-               WHERE o.status = 'paid' AND o.closed_at BETWEEN ? AND ?""", rng)]
+                      'Buyurtma #' || o.id AS comment, u.full_name AS user_name,
+                      CASE o.status WHEN 'paid' THEN 'done' ELSE 'cancelled' END AS status,
+                      o.refunded_at AS cancelled_at, o.refund_reason AS cancel_reason,
+                      ru.full_name AS cancelled_by_name
+               FROM orders o
+               LEFT JOIN users u ON u.id = o.cashier_id
+               LEFT JOIN users ru ON ru.id = o.refunded_by
+               WHERE o.status IN ('paid', 'refunded') AND o.closed_at BETWEEN ? AND ?""", rng)]
     if direction:
         entries = [e for e in entries if e["direction"] == direction]
     if account:

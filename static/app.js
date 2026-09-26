@@ -636,7 +636,7 @@ async function viewOrder(id) {
   function renderCart() {
     $("#order-title").innerHTML = title();
     const open = order.status === "open";
-    const statusText = { paid: "✅ To'langan", cancelled: "❌ Bekor qilingan" }[order.status];
+    const statusText = { paid: "✅ To'langan", cancelled: "❌ Bekor qilingan", refunded: "↩️ Pul qaytarilgan" }[order.status];
     $("#cart").innerHTML = `
       <h3>Buyurtma ${statusText ? `<span class="badge">${statusText}</span>` : ""}</h3>
       <div class="muted">${esc(order.waiter_name || "")} · ${time(order.created_at)}</div>
@@ -1044,8 +1044,9 @@ function entriesTable(entries, withCancel) {
             <td>${e.status === "cancelled"
               ? `<span class="badge off" title="${esc((e.cancelled_by_name || "") + (e.cancel_reason ? ": " + e.cancel_reason : ""))}">Bekor qilingan</span>`
               : `<span class="badge ok">Bajarildi</span>`}</td>
-            ${withCancel ? `<td class="right">${e.source === "manual" && e.status === "done"
-              ? `<button class="btn small danger" data-cancel="${e.id}">Bekor qilish</button>` : ""}</td>` : ""}
+            ${withCancel ? `<td class="right">${e.status === "done"
+              ? `<button class="btn small danger" data-cancel="${e.id}" data-source="${e.source}"
+                  data-direction="${e.direction}" data-amount="${e.amount}">Bekor qilish</button>` : ""}</td>` : ""}
           </tr>`).join("")}
       </tbody>
     </table></div>`;
@@ -1053,10 +1054,16 @@ function entriesTable(entries, withCancel) {
 
 function bindCancel(root, onDone) {
   $$("[data-cancel]", root).forEach((b) => b.addEventListener("click", safe(async () => {
-    const reason = prompt("Tranzaksiya bekor qilinadi (o'chirilmaydi, tarixda qoladi).\nSababini yozing:");
+    const sale = b.dataset.source === "sale";
+    const effect = b.dataset.direction === "in"
+      ? `${money(+b.dataset.amount)} kassadan chiqadi`
+      : `${money(+b.dataset.amount)} kassaga qaytadi`;
+    const reason = prompt(
+      (sale ? `Buyurtma #${b.dataset.cancel} savdosi bekor qilinadi (pul qaytarildi).\n` : "Tranzaksiya bekor qilinadi.\n") +
+      `${effect}. Yozuv o'chirilmaydi, tarixda qoladi.\n\nSababini yozing:`);
     if (reason === null) return;
-    await api("POST", `/api/finance/entries/${b.dataset.cancel}/cancel`, { reason });
-    toast("Tranzaksiya bekor qilindi");
+    await api("POST", sale ? `/api/finance/sales/${b.dataset.cancel}/cancel` : `/api/finance/entries/${b.dataset.cancel}/cancel`, { reason });
+    toast(`Bekor qilindi: ${effect}`);
     onDone();
   })));
 }

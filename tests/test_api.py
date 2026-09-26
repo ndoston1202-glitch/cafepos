@@ -577,6 +577,28 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(self.waiter.call("POST", f"/api/orders/{order['id']}/discard")[0], 403)
         self.assertEqual(self.admin.call("POST", f"/api/orders/{order['id']}/discard")[0], 200)
 
+    def test_cancel_sale_refunds(self):
+        _, prod = self.admin.call("POST", "/api/products", {"name": "Qaytariladigan", "price": 25000})
+        order = self.new_order_with(prod["id"], prod["id"])
+        _, paid = self.cashier.call("POST", f"/api/orders/{order['id']}/pay", {"method": "card"})
+        card = lambda b: next(a for a in b["accounts"] if a["account"] == "card")["balance"]
+        _, bal_before = self.admin.call("GET", "/api/finance/balance")
+        _, rep_before = self.admin.call("GET", "/api/reports")
+
+        self.assertEqual(self.cashier.call("POST", f"/api/finance/sales/{order['id']}/cancel")[0], 403)
+        self.assertEqual(self.admin.call("POST", f"/api/finance/sales/{order['id']}/cancel", {"reason": "xato chek"})[0], 200)
+        self.assertEqual(self.admin.call("POST", f"/api/finance/sales/{order['id']}/cancel")[0], 409)
+
+        _, bal_after = self.admin.call("GET", "/api/finance/balance")
+        self.assertEqual(card(bal_before) - card(bal_after), paid["total"])  # kirgan pul chiqdi
+        _, rep_after = self.admin.call("GET", "/api/reports")
+        self.assertEqual(rep_before["summary"]["revenue"] - rep_after["summary"]["revenue"], paid["total"])
+        _, lst = self.admin.call("GET", "/api/finance/entries?source=sales")
+        row = next(e for e in lst["entries"] if e["id"] == order["id"])
+        self.assertEqual((row["status"], row["cancel_reason"]), ("cancelled", "xato chek"))
+        _, detail = self.admin.call("GET", f"/api/orders/{order['id']}")
+        self.assertEqual(detail["status"], "refunded")  # o'chirilmadi, tarixda qoldi
+
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})
