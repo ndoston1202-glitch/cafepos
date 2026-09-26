@@ -624,7 +624,8 @@ def list_tables(conn, user, params, data, query):
                LEFT JOIN order_items i ON i.order_id = o.id
                LEFT JOIN users u ON u.id = o.waiter_id
                WHERE o.status = 'open' AND o.table_id IS NOT NULL
-               GROUP BY o.id"""
+               GROUP BY o.id
+               HAVING COALESCE(SUM(i.qty), 0) > 0"""  # taom qo'shilmagan stol band emas
         )
     }
     for t in tables:
@@ -681,6 +682,9 @@ def list_orders(conn, user, params, data, query):
             (status,),
         )
     )
+    if status == "open":  # bo'sh (taom qo'shilmagan) buyurtmalar kassada ko'rinmaydi
+        orders = [o for o in orders if conn.execute(
+            "SELECT COALESCE(SUM(qty), 0) FROM order_items WHERE order_id = ?", (o["id"],)).fetchone()[0] > 0]
     for o in orders:
         if o["status"] == "open":
             apply_totals(o, service_percent(conn, o["type"], o["hall_id"]))
@@ -796,6 +800,28 @@ def cancel_order(conn, user, params, data, query):
         (params[0],),
     )
     return {"ok": True}
+
+
+@route("POST", r"/api/orders/(\d+)/discard", ("tables",))
+def discard_order(conn, user, params, data, query):
+    """Ofitsiant uchun: oshxonaga yuborilmagan buyurtmadan voz kechish.
+
+    Taom qo'shilmagan bo'lsa - buyurtma butunlay o'chadi (stol bo'shaydi, tarixda iz qolmaydi).
+    Taom bor, lekin oshxonaga yuborilmagan bo'lsa - "bekor qilingan" bo'ladi.
+    Oshxonaga yuborilgan bo'lsa - faqat kassa ruxsati bilan (/cancel).
+    """
+    open_order(conn, params[0])
+    items = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(printed_qty + kds_qty), 0) FROM order_items WHERE order_id = ?",
+        (params[0],),
+    ).fetchone()
+    if items[0] == 0:
+        conn.execute("DELETE FROM kitchen_tickets WHERE order_id = ?", (params[0],))
+        conn.execute("DELETE FROM orders WHERE id = ?", (params[0],))
+        return {"ok": True, "deleted": True}
+    if items[1] > 0 and "cashier" not in user["permissions"]:
+        raise ApiError(403, "Oshxonaga yuborilgan buyurtmani faqat kassir bekor qila oladi")
+    return dict(cancel_order(conn, user, params, data, query), deleted=False)
 
 
 # --- printerlar (ESC/POS termoprinterlar, printing.py)

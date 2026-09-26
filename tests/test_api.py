@@ -546,6 +546,37 @@ class ApiTest(unittest.TestCase):
         # Ruxsatsiz xodim kira olmaydi
         self.assertEqual(self.cashier.call("GET", "/api/finance/balance")[0], 403)
 
+    def test_empty_table_not_busy_and_discard(self):
+        table = self.free_table()
+        _, products = self.waiter.call("GET", "/api/products")
+        _, order = self.waiter.call("POST", "/api/orders", {"type": "dine_in", "table_id": table["id"]})
+        # Taom qo'shilmagan - stol bo'sh, kassada ham ko'rinmaydi
+        _, tables = self.waiter.call("GET", "/api/tables")
+        self.assertIsNone(next(t for t in tables if t["id"] == table["id"])["order"])
+        _, open_orders = self.cashier.call("GET", "/api/orders?status=open")
+        self.assertNotIn(order["id"], [o["id"] for o in open_orders])
+        # Chiqib ketdi - buyurtma butunlay o'chadi
+        status, res = self.waiter.call("POST", f"/api/orders/{order['id']}/discard")
+        self.assertEqual((status, res["deleted"]), (200, True))
+        self.assertEqual(self.waiter.call("GET", f"/api/orders/{order['id']}")[0], 404)
+
+        # Taom bor, oshxonaga yuborilmagan - ofitsiant bekor qila oladi
+        _, order = self.waiter.call("POST", "/api/orders", {"type": "dine_in", "table_id": table["id"]})
+        self.waiter.call("POST", f"/api/orders/{order['id']}/items", {"product_id": products[0]["id"]})
+        _, tables = self.waiter.call("GET", "/api/tables")
+        self.assertIsNotNone(next(t for t in tables if t["id"] == table["id"])["order"])
+        status, res = self.waiter.call("POST", f"/api/orders/{order['id']}/discard")
+        self.assertEqual((status, res["deleted"]), (200, False))
+        _, detail = self.admin.call("GET", f"/api/orders/{order['id']}")
+        self.assertEqual(detail["status"], "cancelled")
+
+        # Oshxonaga yuborilgan - ofitsiant emas, faqat kassir
+        _, order = self.waiter.call("POST", "/api/orders", {"type": "dine_in", "table_id": table["id"]})
+        self.waiter.call("POST", f"/api/orders/{order['id']}/items", {"product_id": products[0]["id"]})
+        self.waiter.call("POST", f"/api/orders/{order['id']}/kitchen-send")
+        self.assertEqual(self.waiter.call("POST", f"/api/orders/{order['id']}/discard")[0], 403)
+        self.assertEqual(self.admin.call("POST", f"/api/orders/{order['id']}/discard")[0], 200)
+
     def test_admin_cannot_demote_self(self):
         _, me = self.admin.call("GET", "/api/me")
         status, _ = self.admin.call("PUT", f"/api/users/{me['id']}", {"full_name": "A", "role": "waiter"})

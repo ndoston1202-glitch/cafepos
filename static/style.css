@@ -773,6 +773,9 @@ tr.inactive td { opacity: .5; }
 @media (max-width: 1100px) { .finance-balances { grid-template-columns: repeat(2, 1fr); } .finance-balances .total-kpi { grid-column: 1 / -1; } }
 @media (max-width: 600px) { .account-pick { grid-template-columns: repeat(2, 1fr); } }
 
+.confirm-actions { display: grid; gap: 8px; margin-top: 16px; }
+.btn.danger.big { background: #fff; }
+
 /* --- jadval */
 table.list { width: 100%; border-collapse: collapse; }
 table.list th, table.list td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; }

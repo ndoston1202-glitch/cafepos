@@ -571,7 +571,44 @@ async function viewOrder(id) {
       <div class="panel cart" id="cart"></div>
     </div>`);
 
-  $("#back-btn").addEventListener("click", () => history.length > 1 ? history.back() : (location.hash = "#/tables"));
+  const leave = () => {
+    state.leaveHook = null;
+    if (history.length > 1) history.back();
+    else location.hash = "#/tables";
+  };
+  // Taom qo'shilmagan buyurtma - stol band bo'lmasin (boshqa bo'limga o'tilganda ham)
+  const discardIfEmpty = () => {
+    if (order.status === "open" && !order.items.length) {
+      api("POST", `/api/orders/${order.id}/discard`).catch(() => {});
+    }
+  };
+  state.leaveHook = discardIfEmpty;
+
+  $("#back-btn").addEventListener("click", () => {
+    if (order.status !== "open") return leave();
+    if (!order.items.length) {
+      discardIfEmpty();
+      return leave();
+    }
+    openModal(`
+      <div class="modal-head"><h2>Buyurtmani bekor qilishni xohlaysizmi?</h2>
+        <button type="button" class="icon-btn" data-close aria-label="Yopish">✕</button></div>
+      <p class="muted">${esc(place(order))} · ${order.items.length} xil taom · ${money(order.total)}</p>
+      <div class="confirm-actions">
+        <button type="button" class="btn danger big" id="leave-cancel">Ha, bekor qilish</button>
+        <button type="button" class="btn primary big" id="leave-keep">Yo'q, saqlab chiqish</button>
+        <button type="button" class="btn big" data-close>Buyurtmaga qaytish</button>
+      </div>`, (m) => {
+      $("#leave-keep", m).addEventListener("click", () => { closeModal(); leave(); });
+      $("#leave-cancel", m).addEventListener("click", safe(async () => {
+        await api("POST", `/api/orders/${order.id}/discard`);
+        closeModal();
+        toast("Buyurtma bekor qilindi");
+        state.leaveHook = null;
+        location.hash = "#/tables";
+      }));
+    });
+  });
 
   function renderProducts() {
     const cats = [{ id: "all", name: "Hammasi" }, ...state.categories];
@@ -1917,6 +1954,11 @@ const routes = [
 async function router() {
   if (!state.user) return renderLogin();
   closeModal();
+  if (state.leaveHook) {  // oldingi sahifa chiqishda tozalash qilishi kerak bo'lsa
+    const hook = state.leaveHook;
+    state.leaveHook = null;
+    hook();
+  }
   const hash = location.hash.split("?")[0];
   for (const [re, view, perms] of routes) {
     const m = hash.match(re);
