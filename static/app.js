@@ -253,13 +253,14 @@ function renderLogin() {
       </div>
     </div>`;
   bindInstallButtons($("#app"));
-  // Kompyuterda karta chap tarafdagi blok (logo ... pastki yozuv) balandligida va kvadrat
+  // Kompyuterda karta chap tarafdagi blok (logo ... pastki yozuv) balandligida
   const fit = () => {
     const card = $("#pin-card");
     if (!card) return window.removeEventListener("resize", fit);
     const hero = $(".auth-hero");
-    const size = window.innerWidth > 760 ? Math.max(hero.offsetHeight, 360) : 0;
-    card.style.width = card.style.height = size ? size + "px" : "";
+    const size = window.innerWidth > 760 ? Math.max(hero.offsetHeight, 340) : 0;
+    card.style.height = size ? size + "px" : "";
+    card.style.width = size ? Math.round(size * 0.78) + "px" : "";  // bo'yi - blok balandligida, eni torroq
   };
   window.addEventListener("resize", fit);
   $(".auth-hero-logo").addEventListener("load", fit);  // logo yuklangach blok balandligi o'zgaradi
