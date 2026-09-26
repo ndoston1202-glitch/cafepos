@@ -2586,13 +2586,7 @@ async function viewJournal() {
 // Yangi integratsiya qo'shish: shu ro'yxatga yozuv va (tayyor bo'lsa) sahifa
 const INTEGRATIONS = [
   { key: "telegram", icon: "telegram", name: "Telegram bot", href: "#/integrations/telegram",
-    text: "Jurnaldagi amallar (sotuv, kirim-chiqim, qarz, mahsulot...) Telegram'ga xabar bo'lib boradi." },
-  { key: "sms", icon: "phone", name: "SMS xabarnoma", soon: true,
-    text: "Mijozlarga qarz muddati va aksiyalar haqida SMS." },
-  { key: "payments", icon: "card", name: "Payme / Click", soon: true,
-    text: "To'lovlarni QR orqali qabul qilish va avtomatik tasdiqlash." },
-  { key: "delivery", icon: "box", name: "Yetkazib berish", soon: true,
-    text: "Yetkazib berish xizmatlaridan buyurtmalarni qabul qilish." },
+    text: "Sotuv, kirim-chiqim, qarz va boshqa amallar haqida Telegram'ga xabar keladi." },
 ];
 
 async function viewIntegrations() {
@@ -2601,7 +2595,6 @@ async function viewIntegrations() {
   list.forEach((i) => { status[i.key] = i; });
   layout(`
     <div class="toolbar"><h2>Integratsiyalar</h2></div>
-    <p class="muted">Boshqa xizmatlar bilan ulanish. Yangi integratsiyalar shu yerga qo'shib boriladi.</p>
     <div class="integration-grid">
       ${INTEGRATIONS.map((it) => {
         const s = status[it.key];
@@ -2619,141 +2612,132 @@ async function viewIntegrations() {
     </div>`);
 }
 
-async function viewTelegram() {
-  const cfg = await api("GET", "/api/integrations/telegram");
-  let chats = cfg.chats.slice();
-  let bot = cfg.bot;
-  const cats = Object.keys(cfg.all_categories);
-  const view = layout(`
-    <div class="toolbar"><a class="btn small" href="#/integrations">← Integratsiyalar</a>
-      <h2 style="flex:1">Telegram bot</h2>
-      <label class="tg-switch"><input type="checkbox" id="tg-enabled" ${cfg.enabled ? "checked" : ""}>
-        <span class="slider"></span><b id="tg-state">${cfg.enabled ? "Yoqilgan" : "O'chirilgan"}</b></label>
-    </div>
-    <div class="tg-status" id="tg-status"></div>
-    <div class="tg-layout">
-      <section class="panel tg-step">
-        <h3><span class="step-no">1</span> Bot tokeni</h3>
-        <ol class="muted help-list">
-          <li>Telegram'da <b>@BotFather</b> ni oching va <b>/newbot</b> yozing.</li>
-          <li>Botga nom bering — BotFather <b>token</b> beradi (masalan <code>123456789:AAH...</code>).</li>
-          <li>Tokenni shu yerga qo'ying va <b>Tekshirish</b> ni bosing.</li>
-        </ol>
-        <div class="row-input">
-          <input id="tg-token" autocomplete="off" spellcheck="false"
-            placeholder="${cfg.token_set ? esc(cfg.token_hint) + " (saqlangan)" : "Bot tokeni"}">
-          <button type="button" class="btn" id="tg-check">Tekshirish</button>
+async function viewTelegram(cfgArg) {
+  if (state.leaveHook) { state.leaveHook(); state.leaveHook = null; }  // oldingi kutish taymeri
+  const cfg = cfgArg || await api("GET", "/api/integrations/telegram");
+  const botLink = cfg.bot ? `https://t.me/${cfg.bot.username}` : "";
+  let body;
+  if (!cfg.token_set) {
+    // 1-qadam: faqat token
+    body = `
+      <section class="panel tg-card">
+        <div class="tg-hero">${icon("telegram")}</div>
+        <h3>Telegram botni ulash</h3>
+        <p class="muted">Telegram'da <a href="https://t.me/BotFather" target="_blank" rel="noopener"><b>@BotFather</b></a> ni oching,
+          <b>/newbot</b> yozing va bot nomini bering. U bergan <b>tokenni</b> shu yerga qo'ying.</p>
+        <form id="tg-connect" class="row-input">
+          <input id="tg-token" autocomplete="off" spellcheck="false" placeholder="123456789:AAH..." required>
+          <button class="btn primary">Ulash</button>
+        </form>
+      </section>`;
+  } else if (!cfg.chats.length) {
+    // 2-qadam: botga /start
+    body = `
+      <section class="panel tg-card">
+        <div class="tg-hero">${icon("telegram")}</div>
+        <h3>@${esc(cfg.bot ? cfg.bot.username : "bot")} ulandi. Endi botga /start yozing</h3>
+        <p class="muted">Xabarlar kimga borishi kerak bo'lsa, o'sha odam botni ochib <b>Start</b> ni bossin.
+          Guruhga kelishi kerak bo'lsa — botni guruhga qo'shing va guruhda biror narsa yozing.</p>
+        ${botLink ? `<a class="btn primary big" href="${esc(botLink)}" target="_blank" rel="noopener">${icon("telegram")} Botni ochish</a>` : ""}
+        <p class="tg-wait"><span class="spinner"></span> /start kutilmoqda...</p>
+        <button type="button" class="btn small" id="tg-disconnect">Boshqa bot ulash</button>
+      </section>`;
+  } else {
+    // Ulangan
+    body = `
+      <section class="panel tg-card">
+        <div class="tg-connected">
+          <span class="tg-hero small">${icon("telegram")}</span>
+          <div><b>@${esc(cfg.bot ? cfg.bot.username : "bot")}</b>
+            <small class="muted">${cfg.enabled ? "Xabarlar yuborilmoqda" : "To'xtatilgan"}</small></div>
+          <label class="tg-switch"><input type="checkbox" id="tg-enabled" ${cfg.enabled ? "checked" : ""}><span class="slider"></span></label>
         </div>
-        <div id="tg-bot" class="tg-bot"></div>
-      </section>
-      <section class="panel tg-step">
-        <h3><span class="step-no">2</span> Xabar boradigan chatlar</h3>
-        <p class="muted">Botingizni Telegram'da oching va <b>/start</b> bosing (yoki botni guruhga qo'shib, guruhda biror narsa yozing).
-          So'ng <b>Chatlarni topish</b> ni bosing.</p>
-        <div id="tg-chats"></div>
-        <div class="row-input">
-          <button type="button" class="btn" id="tg-find">${icon("search")} Chatlarni topish</button>
-          <input id="tg-manual" placeholder="yoki chat ID ni qo'lda kiriting" style="flex:1">
-          <button type="button" class="btn small" id="tg-add">Qo'shish</button>
+        ${cfg.status.last_error ? `<div class="notice error-notice">⚠️ ${esc(cfg.status.last_error)}</div>` : ""}
+        <h4>Xabar boradigan chatlar</h4>
+        <div class="tg-chat-list">${cfg.chats.map((c) => `
+          <div class="tg-chat">${icon(String(c.id).charAt(0) === "-" ? "users" : "crm")}
+            <div><b>${esc(c.title || c.id)}</b></div>
+            <button type="button" class="icon-btn" data-remove="${esc(c.id)}" title="Olib tashlash">✕</button></div>`).join("")}
         </div>
-        <div id="tg-found"></div>
-      </section>
-      <section class="panel tg-step">
-        <h3><span class="step-no">3</span> Qaysi amallar yuborilsin</h3>
-        <div class="perm-grid">
-          ${cats.map((k) => `
+        <p class="muted small-note">Yana qo'shish: ${botLink ? `<a href="${esc(botLink)}" target="_blank" rel="noopener">botni oching</a>` : "botni oching"}
+          va /start bosing — chat o'zi qo'shiladi.</p>
+        <details class="tg-more">
+          <summary>Qaysi xabarlar boradi</summary>
+          <div class="perm-grid">${Object.keys(cfg.all_categories).map((k) => `
             <label class="perm-item"><input type="checkbox" name="tg-cat" value="${k}" ${cfg.categories.indexOf(k) >= 0 ? "checked" : ""}>
-              ${icon(JOURNAL_ICONS[k] || "list")}<span>${esc(cfg.all_categories[k])}</span></label>`).join("")}
+              ${icon(JOURNAL_ICONS[k] || "list")}<span>${esc(cfg.all_categories[k])}</span></label>`).join("")}</div>
+        </details>
+        <div class="actions">
+          <button type="button" class="btn danger-text" id="tg-disconnect">Uzish</button>
+          <button type="button" class="btn" id="tg-test">Sinov xabari</button>
         </div>
-        <p class="muted">Jurnalga yozilgan har bir amal (kim, qachon, nima qilgani) tanlangan bo'limlar bo'yicha xabar bo'lib boradi.
-          "Buyurtmalar" — taom qo'shish/oshxonaga yuborish kabi mayda amallar, ular ko'p bo'ladi.</p>
-      </section>
-    </div>
-    <div class="actions tg-actions">
-      <button type="button" class="btn" id="tg-test">Sinov xabari yuborish</button>
-      <button type="button" class="btn primary" id="tg-save">Saqlash</button>
-    </div>`);
+      </section>`;
+  }
+  const view = layout(`
+    <div class="toolbar"><a class="btn small" href="#/integrations">← Integratsiyalar</a><h2>Telegram bot</h2></div>
+    ${body}`);
 
-  const renderStatus = (s) => {
-    $("#tg-status", view).innerHTML = [
-      s.last_error ? `<div class="notice error-notice">⚠️ Oxirgi xato: ${esc(s.last_error)}</div>` : "",
-      s.last_ok ? `<div class="notice ok-notice">✅ Oxirgi xabar yuborildi: ${esc(s.last_ok)} · jami ${s.sent} ta</div>` : "",
-    ].join("");
+  const save = async (patch) => {
+    const next = await api("PUT", "/api/integrations/telegram", Object.assign({
+      enabled: cfg.enabled, chats: cfg.chats, categories: cfg.categories }, patch));
+    viewTelegram(next);
   };
-  const renderBot = () => {
-    $("#tg-bot", view).innerHTML = bot ? `${icon("telegram")} <b>@${esc(bot.username)}</b> <span class="muted">${esc(bot.first_name || "")}</span>
-      <a class="btn small" target="_blank" rel="noopener" href="https://t.me/${esc(bot.username)}">Botni ochish</a>` : "";
-  };
-  const renderChats = () => {
-    $("#tg-chats", view).innerHTML = chats.length ? `<div class="tg-chat-list">${chats.map((c, i) => `
-      <div class="tg-chat">${icon(String(c.id).charAt(0) === "-" ? "users" : "crm")}
-        <div><b>${esc(c.title || "Chat")}</b><small class="muted">ID: ${esc(c.id)}</small></div>
-        <button type="button" class="icon-btn" data-remove="${i}" title="Olib tashlash">✕</button></div>`).join("")}</div>`
-      : `<p class="muted"><i>Hali chat qo'shilmagan</i></p>`;
-    $$("[data-remove]", view).forEach((b) => b.addEventListener("click", () => {
-      chats.splice(+b.dataset.remove, 1);
-      renderChats();
-    }));
-  };
-  const addChat = (c) => {
-    if (chats.some((x) => String(x.id) === String(c.id))) return toast("Bu chat allaqachon qo'shilgan");
-    chats.push({ id: String(c.id), title: c.title || "" });
-    renderChats();
-  };
-  const token = () => $("#tg-token", view).value.trim();
-  const busy = async (btn, fn) => {
+  const connect = $("#tg-connect", view);
+  if (connect) connect.addEventListener("submit", safe(async (e) => {
+    e.preventDefault();
+    const btn = $("button", connect);
     btn.disabled = true;
-    try { await fn(); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
-  };
-  renderStatus(cfg.status);
-  renderBot();
-  renderChats();
-
-  $("#tg-enabled", view).addEventListener("change", (e) => {
-    $("#tg-state", view).textContent = e.target.checked ? "Yoqilgan" : "O'chirilgan";
-  });
-  $("#tg-check", view).addEventListener("click", (e) => busy(e.currentTarget, async () => {
-    bot = await api("POST", "/api/integrations/telegram/check", { token: token() });
-    renderBot();
-    toast("Bot topildi: @" + bot.username);
+    try {
+      const next = await api("POST", "/api/integrations/telegram/connect", { token: $("#tg-token", view).value.trim() });
+      toast("Bot ulandi ✅");
+      viewTelegram(next);
+    } finally { btn.disabled = false; }
   }));
-  $("#tg-find", view).addEventListener("click", (e) => busy(e.currentTarget, async () => {
-    const found = await api("POST", "/api/integrations/telegram/chats", { token: token() });
-    const box = $("#tg-found", view);
-    box.innerHTML = found.length ? `<p class="muted">Topilgan chatlar — qo'shish uchun bosing:</p>
-      <div class="tg-found">${found.map((c, i) => `<button type="button" class="btn small" data-found="${i}">
-        + ${esc(c.title || c.id)} <small class="muted">${c.type === "private" ? "shaxsiy" : c.type === "channel" ? "kanal" : "guruh"}</small></button>`).join("")}</div>`
-      : `<p class="error">Chat topilmadi. Botga Telegram'da /start yozing va qayta bosing.</p>`;
-    $$("[data-found]", box).forEach((b) => b.addEventListener("click", () => {
-      addChat(found[+b.dataset.found]);
-      b.remove();
-    }));
+  if (cfg.token_set && !cfg.chats.length) {
+    // /start yozilishini kutamiz - har 3 soniyada tekshiriladi
+    const timer = setInterval(async () => {
+      try {
+        const next = await api("POST", "/api/integrations/telegram/link", {});
+        if (next.added.length) {
+          clearInterval(timer);
+          toast("Ulandi: " + next.added.join(", ") + " ✅");
+          viewTelegram(next);
+        }
+      } catch (e) { /* internet yo'q - keyinroq yana urinamiz */ }
+    }, 3000);
+    state.leaveHook = () => clearInterval(timer);
+  }
+  if (cfg.chats.length && cfg.token_set) {
+    // ulangan sahifada ham yangi /start yozganlar o'zi qo'shiladi (bir marta tekshiriladi)
+    api("POST", "/api/integrations/telegram/link", {}).then((next) => {
+      if (next.added.length && location.hash === "#/integrations/telegram") {
+        toast("Yangi chat qo'shildi: " + next.added.join(", "));
+        viewTelegram(next);
+      }
+    }).catch(() => {});
+  }
+  const enabled = $("#tg-enabled", view);
+  if (enabled) enabled.addEventListener("change", safe(() => save({ enabled: enabled.checked })));
+  $$("[data-remove]", view).forEach((b) => b.addEventListener("click", safe(() => {
+    if (!confirm("Bu chatga xabar yuborish to'xtatilsinmi?")) return;
+    const chats = cfg.chats.filter((c) => String(c.id) !== b.dataset.remove);
+    return save({ chats, enabled: cfg.enabled && chats.length > 0 });
+  })));
+  $$("input[name=tg-cat]", view).forEach((i) => i.addEventListener("change", safe(async () => {
+    const categories = $$("input[name=tg-cat]:checked", view).map((x) => x.value);
+    cfg.categories = categories;
+    await api("PUT", "/api/integrations/telegram", { enabled: cfg.enabled, chats: cfg.chats, categories });
+    toast("Saqlandi");
+  })));
+  const test = $("#tg-test", view);
+  if (test) test.addEventListener("click", safe(async () => {
+    await api("POST", "/api/integrations/telegram/test", {});
+    toast("Sinov xabari yuborildi — Telegram'ni tekshiring ✅");
   }));
-  $("#tg-add", view).addEventListener("click", () => {
-    const v = $("#tg-manual", view).value.trim();
-    if (!/^-?\d{3,20}$|^@[A-Za-z0-9_]{4,64}$/.test(v)) return toast("Chat ID raqam bo'lsin (masalan 123456789 yoki -100...)", true);
-    addChat({ id: v });
-    $("#tg-manual", view).value = "";
-  });
-  const payload = () => {
-    const body = { enabled: $("#tg-enabled", view).checked, chats,
-      categories: $$("input[name=tg-cat]:checked", view).map((i) => i.value) };
-    if (token()) body.token = token();
-    if (bot) body.bot = bot;
-    return body;
-  };
-  $("#tg-save", view).addEventListener("click", (e) => busy(e.currentTarget, async () => {
-    const saved = await api("PUT", "/api/integrations/telegram", payload());
-    toast(saved.enabled ? "Saqlandi — Telegram'ga xabarlar boradi ✅" : "Saqlandi (o'chirilgan)");
-    viewTelegram();
-  }));
-  $("#tg-test", view).addEventListener("click", (e) => busy(e.currentTarget, async () => {
-    const body = { chats };
-    if (token()) body.token = token();
-    const res = await api("POST", "/api/integrations/telegram/test", body);
-    const bad = res.filter((r) => !r.ok);
-    toast(bad.length ? `Ba'zi chatlarga bormadi: ${bad.map((r) => `${r.title || r.id} (${r.error})`).join("; ")}`
-      : "Sinov xabari yuborildi — Telegram'ni tekshiring ✅", !!bad.length);
+  const disc = $("#tg-disconnect", view);
+  if (disc) disc.addEventListener("click", safe(async () => {
+    if (cfg.chats.length && !confirm("Telegram bot uzilsinmi? Xabarlar boshqa yuborilmaydi.")) return;
+    viewTelegram(await api("DELETE", "/api/integrations/telegram"));
   }));
 }
 

@@ -2728,6 +2728,95 @@ def test_telegram(conn, user, params, data, query):
     return Deferred(run)
 
 
+# Oddiy ulash: token -> "Ulash", keyin botga /start yoziladi va chat o'zi qo'shiladi
+
+
+def telegram_update(conn, user, change, title=None, summary=""):
+    """Telegram sozlamasini baza qulfi ostida o'zgartiradi (Deferred ichidan chaqiriladi)."""
+    with db_lock:
+        try:
+            enabled, cfg = get_integration(conn, "telegram")
+            enabled = change(cfg, enabled)
+            save_integration(conn, "telegram", enabled, cfg)
+            if title:
+                write_journal(conn, user, "settings", entry(title, summary), "telegram")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return telegram_public(conn)
+
+
+@route("POST", "/api/integrations/telegram/connect", ("integrations",))
+def connect_telegram(conn, user, params, data, query):
+    token = (data.get("token") or "").strip()
+    if not re.fullmatch(r"\d{5,15}:[A-Za-z0-9_-]{20,100}", token):
+        raise ApiError(400, "Token noto'g'ri. @BotFather bergan tokenni to'liq nusxalang")
+
+    def run():
+        try:
+            me = telegram.get_me(token)
+        except telegram.TelegramError as e:
+            raise ApiError(502, str(e))
+        bot = {k: me.get(k) for k in ("id", "username", "first_name")}
+
+        def change(cfg, enabled):
+            if cfg.get("token") != token:
+                cfg["chats"] = []
+            cfg.update(token=token, bot=bot)
+            return bool(cfg.get("chats"))
+        return telegram_update(conn, user, change, "Telegram bot ulandi", "@" + str(bot["username"]))
+    return Deferred(run)
+
+
+@route("POST", "/api/integrations/telegram/link", ("integrations",))
+def link_telegram_chats(conn, user, params, data, query):
+    """Botga /start yozgan chatlarni topib, o'zi qo'shadi va salom xabarini yuboradi."""
+    _, cfg = get_integration(conn, "telegram")
+    token = cfg.get("token")
+    if not token:
+        raise ApiError(400, "Avval botni ulang")
+    known = {str(c["id"]) for c in cfg.get("chats", [])}
+    cafe = get_settings(conn)["cafe_name"]
+
+    def run():
+        try:
+            found = [c for c in telegram.find_chats(token) if str(c["id"]) not in known]
+        except telegram.TelegramError as e:
+            raise ApiError(502, str(e))
+        if not found:
+            return dict(telegram_public_locked(conn), added=[])
+        for c in found:
+            try:
+                telegram.send_message(token, c["id"], f"✅ <b>{html_escape(cafe)}</b> ulandi.\n"
+                                      "Endi dasturdagi amallar (sotuv, kirim-chiqim, qarzlar...) shu yerga keladi.")
+            except telegram.TelegramError:
+                pass
+
+        def change(cfg, enabled):
+            chats = cfg.setdefault("chats", [])
+            for c in found:
+                if str(c["id"]) not in {str(x["id"]) for x in chats}:
+                    chats.append({"id": str(c["id"]), "title": c["title"]})
+            return True
+        names = ", ".join(c["title"] or str(c["id"]) for c in found)
+        return dict(telegram_update(conn, user, change, "Telegram chat qo'shildi", names),
+                    added=[c["title"] or str(c["id"]) for c in found])
+    return Deferred(run)
+
+
+def telegram_public_locked(conn):
+    with db_lock:
+        return telegram_public(conn)
+
+
+@route("DELETE", "/api/integrations/telegram", ("integrations",))
+def disconnect_telegram(conn, user, params, data, query):
+    save_integration(conn, "telegram", False, {})
+    write_journal(conn, user, "settings", entry("Telegram bot uzildi"), "telegram")
+    return telegram_public(conn)
+
+
 # --- jurnal sahifasi
 
 

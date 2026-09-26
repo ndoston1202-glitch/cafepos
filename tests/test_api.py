@@ -899,6 +899,23 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(sent[0]["chat_id"], ["555111"])
             self.assertIn("77 000 so'm", sent[0]["text"][0])
             self.assertIn("Telegram sinov", sent[0]["text"][0])
+
+            # soddalashtirilgan ulash: uzish -> token bilan ulash -> /start yozganlar o'zi qo'shiladi
+            _, cfg = self.admin.call("DELETE", "/api/integrations/telegram")
+            self.assertFalse(cfg["token_set"])
+            status, _ = self.admin.call("POST", "/api/integrations/telegram/connect", {"token": "yomon"})
+            self.assertEqual(status, 400)
+            status, cfg = self.admin.call("POST", "/api/integrations/telegram/connect", {"token": token})
+            self.assertEqual(status, 200)
+            self.assertEqual((cfg["token_set"], cfg["chats"], cfg["enabled"]), (True, [], False))
+            self.assertEqual(cfg["bot"]["username"], "cafe_test_bot")
+            sent.clear()
+            status, cfg = self.admin.call("POST", "/api/integrations/telegram/link", {})
+            self.assertEqual((status, cfg["added"], cfg["enabled"]), (200, ["Ali"], True))
+            self.assertEqual(len(sent), 1)  # salom xabari
+            _, cfg = self.admin.call("POST", "/api/integrations/telegram/link", {})
+            self.assertEqual(cfg["added"], [])  # ikkinchi marta qo'shilmaydi
+            self.assertEqual(len(cfg["chats"]), 1)
         finally:
             self.admin.call("PUT", "/api/integrations/telegram", {"enabled": False})
             telegram.API = old_api

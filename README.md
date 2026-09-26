@@ -59,10 +59,9 @@ Linux/macOS: `python3 desktop.py` (yoki faqat server: `python3 server.py`)
 ### 🤖 Telegram botni ulash
 
 1. Telegram'da **@BotFather** → `/newbot` → bot nomini yozing → **token** beriladi
-2. CafePOS → **Integratsiyalar → Telegram bot** → tokenni qo'ying → **Tekshirish**
-3. Botingizni Telegram'da oching va **/start** bosing (guruh uchun: botni guruhga qo'shing va biror narsa yozing)
-4. **Chatlarni topish** → kerakli chatlarni qo'shing
-5. Qaysi bo'limlar yuborilishini belgilang, **Yoqilgan** ni yoqing → **Saqlash** → **Sinov xabari yuborish**
+2. CafePOS → **Integratsiyalar → Telegram bot** → tokenni qo'ying → **Ulash**
+3. **Botni ochish** → **Start** bosing — chat o'zi qo'shiladi va xabarlar kela boshlaydi
+   (guruh uchun: botni guruhga qo'shib, guruhda biror narsa yozing)
 
 Kompyuterda internet bo'lishi kerak. Internet uzilsa dastur ishlashda davom etadi, xato Telegram sahifasida ko'rinadi.
 

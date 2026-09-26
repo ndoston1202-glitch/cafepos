@@ -1004,3 +1004,20 @@ a.integration-card:hover { border-color: var(--primary); box-shadow: 0 6px 18px 
 .tg-switch .slider::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform .15s; }
 .tg-switch input:checked + .slider { background: #2e7d32; }
 .tg-switch input:checked + .slider::after { transform: translateX(20px); }
+.tg-card { max-width: 560px; text-align: left; }
+.tg-hero { display: grid; place-items: center; width: 56px; height: 56px; border-radius: 16px; background: #229ed9; color: #fff; margin-bottom: 10px; }
+.tg-hero .icon { width: 28px; height: 28px; }
+.tg-hero.small { width: 42px; height: 42px; border-radius: 12px; margin: 0; }
+.tg-hero.small .icon { width: 21px; height: 21px; }
+.tg-card h3 { margin: 0 0 6px; }
+.tg-card h4 { margin: 16px 0 8px; }
+.tg-card .btn.big { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 12px 0; text-decoration: none; }
+.tg-wait { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.spinner { width: 16px; height: 16px; border: 2px solid var(--line); border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.tg-connected { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.tg-connected > div { flex: 1; display: flex; flex-direction: column; }
+.small-note { font-size: 13px; margin-top: 8px; }
+.tg-more { margin-top: 12px; }
+.tg-more summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+.btn.danger-text { color: var(--danger); margin-right: auto; }
