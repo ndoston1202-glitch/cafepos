@@ -1081,9 +1081,9 @@ a.integration-card:hover { border-color: var(--primary); box-shadow: 0 6px 18px 
 .pin-dots.shake i { border-color: #ff8a80; background: #ff8a80; box-shadow: none; }
 @keyframes pin-shake { 0%, 100% { transform: translateX(0); } 20%, 60% { transform: translateX(-9px); } 40%, 80% { transform: translateX(9px); } }
 .pin-error { min-height: 20px; margin: 6px 0 8px; color: #ff8a80; font-size: 13px; }
-.pin-pad { display: grid; grid-template-columns: repeat(3, 68px); justify-content: center; gap: 14px 22px; }
+.pin-pad { display: grid; grid-template-columns: repeat(3, 68px); justify-content: center; gap: 14px 18px; }
 .pin-pad button {
-  width: 68px; height: 68px; border-radius: 50%; cursor: pointer;
+  width: 68px; height: 68px; border-radius: 16px; cursor: pointer;
   border: 1px solid rgba(255, 255, 255, .12); background: rgba(255, 255, 255, .06); color: #fff;
   font-size: 26px; font-weight: 400; font-family: inherit;
   display: grid; place-items: center; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
@@ -1091,7 +1091,7 @@ a.integration-card:hover { border-color: var(--primary); box-shadow: 0 6px 18px 
 }
 .pin-pad button:hover { background: rgba(208, 138, 76, .16); border-color: rgba(227, 160, 99, .6); }
 .pin-pad button:active { transform: scale(.93); background: #c07a3e; border-color: #c07a3e; }
-.pin-pad .pin-fn { background: transparent; border-color: transparent; color: #b9aea4; font-size: 18px; }
+.pin-pad .pin-fn { background: rgba(255, 255, 255, .03); border-color: rgba(255, 255, 255, .06); color: #b9aea4; font-size: 18px; }
 .pin-pad .pin-fn svg { width: 26px; height: 26px; }
 .pin-pad .pin-fn:hover { background: rgba(255, 255, 255, .06); color: #fff; }
 .pin-card .auth-install { margin-top: 18px; background: rgba(255, 255, 255, .06); color: #e3a063; border-color: rgba(227, 160, 99, .4); }
@@ -1103,7 +1103,7 @@ a.integration-card:hover { border-color: var(--primary); box-shadow: 0 6px 18px 
   .pin-card { width: 100%; max-width: 360px; margin: 0 auto; padding: 20px 16px 18px; background: transparent; border: 0; box-shadow: none;
     -webkit-backdrop-filter: none; backdrop-filter: none; }
   .pin-clock b { font-size: 38px; }
-  .pin-pad { grid-template-columns: repeat(3, 72px); gap: 14px 26px; }
+  .pin-pad { grid-template-columns: repeat(3, 72px); gap: 14px 20px; }
   .pin-pad button { width: 72px; height: 72px; font-size: 28px; }
 }
 @media (max-height: 660px) {
