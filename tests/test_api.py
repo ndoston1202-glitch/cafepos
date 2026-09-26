@@ -586,7 +586,7 @@ class ApiTest(unittest.TestCase):
         _, bal_before = self.admin.call("GET", "/api/finance/balance")
         _, rep_before = self.admin.call("GET", "/api/reports")
 
-        self.assertEqual(self.cashier.call("POST", f"/api/finance/sales/{order['id']}/cancel")[0], 403)
+        self.assertEqual(self.waiter.call("POST", f"/api/finance/sales/{order['id']}/cancel")[0], 403)
         self.assertEqual(self.admin.call("POST", f"/api/finance/sales/{order['id']}/cancel", {"reason": "xato chek"})[0], 200)
         self.assertEqual(self.admin.call("POST", f"/api/finance/sales/{order['id']}/cancel")[0], 409)
 
@@ -922,6 +922,159 @@ class ApiTest(unittest.TestCase):
             fake.shutdown()
             fake.server_close()
 
+    def test_customer_bot(self):
+        import server
+        import telegram
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import parse_qs
+
+        sent = []
+
+        class FakeTelegram(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = parse_qs(self.rfile.read(int(self.headers["Content-Length"] or 0)).decode())
+                method = self.path.rsplit("/", 1)[-1]
+                if method == "getMe":
+                    result = {"ok": True, "result": {"id": 77, "username": "kafe_mijoz_bot", "first_name": "Kafe"}}
+                else:
+                    sent.append({k: v[0] for k, v in body.items()})
+                    result = {"ok": True, "result": {}}
+                raw = json.dumps(result).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        def wait_sent(n):
+            for _ in range(60):
+                if len(sent) >= n:
+                    break
+                time.sleep(0.05)
+            telegram.customer_notifier.queue.join()
+
+        fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeTelegram)
+        threading.Thread(target=fake.serve_forever, daemon=True).start()
+        old_api, telegram.API = telegram.API, f"http://127.0.0.1:{fake.server_address[1]}"
+        token = "987654321:BBH" + "z" * 32
+        try:
+            status, _ = self.admin.call("POST", "/api/customers/message", {"all": True, "text": "salom"})
+            self.assertEqual(status, 400)  # bot ulanmagan
+            status, cfg = self.admin.call("POST", "/api/integrations/customer-bot/connect", {"token": token})
+            self.assertEqual(status, 200)
+            self.assertEqual((cfg["enabled"], cfg["bot"]["username"]), (True, "kafe_mijoz_bot"))
+
+            _, c = self.admin.call("POST", "/api/customers", {"name": "Bot Mijoz", "phone": "+998 97 111 22 33", "gender": "f"})
+
+            def reply(update):
+                with server.db_lock:
+                    return server.customer_bot_reply(self.server.conn, update)
+            chat = {"id": 4242, "type": "private"}
+            r = reply({"message": {"chat": chat, "from": {"id": 4242}, "text": "/start"}})
+            self.assertTrue(r[0][2]["keyboard"][0][0]["request_contact"])
+            r = reply({"message": {"chat": chat, "from": {"id": 4242},
+                                   "contact": {"phone_number": "998971112233", "user_id": 999}}})
+            self.assertIn("o'zingizning", r[0][1])  # boshqa odamning raqami
+            r = reply({"message": {"chat": chat, "from": {"id": 4242},
+                                   "contact": {"phone_number": "998900000000", "user_id": 4242}}})
+            self.assertIn("topilmadi", r[0][1])
+            r = reply({"message": {"chat": chat, "from": {"id": 4242},
+                                   "contact": {"phone_number": "998971112233", "user_id": 4242}}})
+            self.assertIn("Bot Mijoz", r[0][1])
+            self.assertIn("Qarzingiz yo'q", r[1][1])
+            _, linked = self.admin.call("GET", "/api/customers?telegram=1")
+            self.assertEqual([x["id"] for x in linked], [c["id"]])
+
+            # savdoda mijoz tanlansa - chek botga boradi
+            table = self.free_table()
+            _, products = self.waiter.call("GET", "/api/products")
+            _, order = self.waiter.call("POST", "/api/orders", {"type": "dine_in", "table_id": table["id"]})
+            self.waiter.call("POST", f"/api/orders/{order['id']}/items", {"product_id": products[0]["id"], "qty": 2})
+            status, paid = self.cashier.call("POST", f"/api/orders/{order['id']}/pay",
+                                             {"method": "cash", "customer_id": c["id"]})
+            self.assertEqual(status, 200)
+            self.assertTrue(paid["customer_notified"])
+            wait_sent(1)
+            self.assertEqual(sent[-1]["chat_id"], "4242")
+            self.assertIn(f"Buyurtma #{order['id']}", sent[-1]["text"])
+            self.assertIn(products[0]["name"], sent[-1]["text"])
+
+            # qarz va balans
+            self.admin.call("POST", f"/api/customers/{c['id']}/debts", {"amount": 45000, "due_date": "2030-01-01"})
+            r = reply({"message": {"chat": chat, "from": {"id": 4242}, "text": server.BTN_BALANCE}})
+            self.assertIn("45 000 so'm", r[0][1])
+            r = reply({"message": {"chat": chat, "from": {"id": 4242}, "text": server.BTN_ORDERS}})
+            self.assertIn(f"#{order['id']}", r[0][1])
+            _, detail = self.admin.call("GET", f"/api/customers/{c['id']}")
+            debt_id = next(d["id"] for d in detail["debts"] if d["remaining"] > 0)
+            self.admin.call("POST", f"/api/debts/{debt_id}/pay", {"method": "cash", "amount": 5000})
+            wait_sent(2)
+            self.assertIn("40 000 so'm", sent[-1]["text"])
+
+            # ommaviy xabar
+            sent.clear()
+            status, res = self.admin.call("POST", "/api/customers/message", {"all": True, "text": "Ertaga 20% chegirma!"})
+            self.assertEqual((status, res["sent"]), (200, 1))
+            wait_sent(1)
+            self.assertIn("Ertaga 20% chegirma!", sent[-1]["text"])
+            status, _ = self.waiter.call("POST", "/api/customers/message", {"all": True, "text": "x x"})
+            self.assertEqual(status, 403)  # ofitsiantda CRM ruxsati yo'q
+        finally:
+            self.admin.call("DELETE", "/api/integrations/customer-bot")
+            telegram.API = old_api
+            fake.shutdown()
+            fake.server_close()
+
+    def test_sales_receipts_return(self):
+        table = self.free_table()
+        _, products = self.waiter.call("GET", "/api/products")
+        p1, p2 = products[0], products[1]
+        _, order = self.waiter.call("POST", "/api/orders", {"type": "dine_in", "table_id": table["id"]})
+        self.waiter.call("POST", f"/api/orders/{order['id']}/items", {"product_id": p1["id"], "qty": 3})
+        self.waiter.call("POST", f"/api/orders/{order['id']}/items", {"product_id": p2["id"], "qty": 1})
+        _, paid = self.cashier.call("POST", f"/api/orders/{order['id']}/pay", {"method": "cash"})
+        _, before = self.admin.call("GET", "/api/reports")
+        _, bal0 = self.admin.call("GET", "/api/finance/balance")
+
+        status, sales = self.admin.call("GET", "/api/sales")
+        self.assertEqual(status, 200)
+        self.assertIn(order["id"], [x["id"] for x in sales["sales"]])
+        status, sale = self.admin.call("GET", f"/api/sales/{order['id']}")
+        self.assertEqual((status, sale["can_manage"]), (200, True))
+        item1 = next(i for i in sale["items"] if i["name"] == p1["name"])
+
+        # ko'p qaytarib bo'lmaydi
+        status, _ = self.cashier.call("POST", f"/api/sales/{order['id']}/return", {"items": [{"item_id": item1["id"], "qty": 4}]})
+        self.assertEqual(status, 400)
+        status, _ = self.waiter.call("POST", f"/api/sales/{order['id']}/return", {"items": [{"item_id": item1["id"], "qty": 1}]})
+        self.assertEqual(status, 403)
+        status, ret = self.cashier.call("POST", f"/api/sales/{order['id']}/return",
+                                        {"items": [{"item_id": item1["id"], "qty": 1}], "reason": "sovuq edi"})
+        self.assertEqual(status, 200)
+        self.assertEqual(ret["amount"], round(p1["price"] * paid["total"] / paid["subtotal"]))
+
+        _, after = self.admin.call("GET", "/api/reports")
+        self.assertEqual(after["summary"]["revenue"], before["summary"]["revenue"] - ret["amount"])
+        _, bal1 = self.admin.call("GET", "/api/finance/balance")
+        cash = lambda b: next(a["balance"] for a in b["accounts"] if a["account"] == "cash")
+        self.assertEqual(cash(bal1), cash(bal0) - ret["amount"])
+        _, sale = self.admin.call("GET", f"/api/sales/{order['id']}")
+        self.assertEqual(sale["returned"], ret["amount"])
+        self.assertEqual(sale["returns"][0]["reason"], "sovuq edi")
+        _, entries = self.admin.call("GET", "/api/finance/entries?source=sales")
+        self.assertTrue(any(e["source"] == "return" and e["amount"] == ret["amount"] for e in entries["entries"]))
+        _, only = self.admin.call("GET", "/api/sales?status=returned")
+        self.assertEqual([x["id"] for x in only["sales"]], [order["id"]])
+
+        # qolganini bekor qilish: savdo butunlay hisobdan chiqadi
+        status, _ = self.cashier.call("POST", f"/api/finance/sales/{order['id']}/cancel", {"reason": "xato"})
+        self.assertEqual(status, 200)
+        _, bal2 = self.admin.call("GET", "/api/finance/balance")
+        self.assertEqual(cash(bal2), cash(bal0) - paid["total"])
+        status, _ = self.cashier.call("POST", f"/api/sales/{order['id']}/return", {"items": [{"item_id": item1["id"], "qty": 1}]})
+        self.assertEqual(status, 409)
 
 
 

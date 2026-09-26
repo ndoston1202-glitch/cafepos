@@ -340,21 +340,22 @@ function icon(name) {
 // Chap menyu: bo'lim {perm, href, icon, name} yoki guruh {icon, name, children}
 const NAV = [
   { perm: "reports", href: "#/dashboard", icon: "home", name: "Bosh sahifa" },
-  { id: "sales", icon: "sales", name: "Savdo", children: [
-    { perm: "tables", href: "#/tables", icon: "tables", name: "Stollar" },
-    { perm: "cashier", href: "#/cashier", icon: "cashier", name: "Kassa" },
-    { perm: "kitchen", href: "#/kitchen", icon: "kitchen", name: "Oshxona" },
-  ] },
+  { perm: "tables", href: "#/tables", icon: "tables", name: "Stollar" },
+  { perm: "kitchen", href: "#/kitchen", icon: "kitchen", name: "Oshxona" },
   { perm: "users", href: "#/users", icon: "users", name: "Sotuvchilar" },
   { perm: "menu", href: "#/menu", icon: "box", name: "Mahsulotlar" },
   { id: "crm", icon: "crm", name: "CRM", children: [
     { perm: "crm", href: "#/crm/customers", icon: "users", name: "Mijozlar" },
     { perm: "crm", href: "#/crm/debts", icon: "debt", name: "Mijozlar qarzi" },
   ] },
-  { perm: "reports", href: "#/reports", icon: "reports", name: "Hisobotlar" },
+  { id: "reports", icon: "reports", name: "Hisobotlar", children: [
+    { perm: "reports", href: "#/reports", icon: "reports", name: "Hisobot" },
+    { perm: "reports", href: "#/reports/sales", icon: "sales", name: "Savdolar" },
+  ] },
   { id: "finance", icon: "finance", name: "Moliya", children: [
     { perm: "finance", href: "#/finance", icon: "cashier", name: "Kassa" },
     { perm: "finance", href: "#/finance/entries", icon: "list", name: "Tranzaksiyalar" },
+    { perm: "finance", href: "#/finance/sales", icon: "sales", name: "Savdolar" },
     { perm: "finance", href: "#/finance/types", icon: "plus", name: "Tranzaksiya yaratish" },
     { perm: "finance", href: "#/finance/balances", icon: "scale", name: "Balansni o'rnatish" },
   ] },
@@ -387,8 +388,9 @@ function defaultRoute() {
 
 // Yuqori paneldagi sarlavha: "Savdo › Stollar"
 function pageTrail(hash) {
-  if (hash.startsWith("#/order/")) return ["Savdo", "Buyurtma"];
+  if (hash.startsWith("#/order/")) return ["Stollar", "Buyurtma"];
   if (hash === "#/integrations/telegram") return ["Integratsiyalar", "Telegram bot"];
+  if (hash === "#/integrations/customer-bot") return ["Integratsiyalar", "Mijozlar boti"];
   for (const item of NAV) {
     if (item.href === hash) return [item.name];
     for (const c of item.children || []) if (c.href === hash) return [item.name, c.name];
@@ -758,9 +760,10 @@ function payModal(order, onPaid) {
     </div>
     <label><span>Chegirma (so'm)</span><input id="discount" type="number" min="0" value="0"></label>
     <div class="totals"><div class="grand"><span>To'lanadi</span><span id="to-pay"></span></div></div>
+    <span class="field-label" id="customer-label"></span>
+    <div id="customer-picker"></div>
+    <div class="muted small-note hidden" id="tg-note">📨 Chek mijozning Telegram'iga yuboriladi</div>
     <div id="debt-box" class="hidden">
-      <span class="field-label">Mijoz (qarzga yoziladi)</span>
-      <div id="customer-picker"></div>
       <label><span>To'lov muddati</span><input id="due-date" type="date" value="${dateAfter(7)}"></label>
     </div>
     <label id="cash-box"><span>Mijoz bergan pul</span><input id="given" type="number" min="0" placeholder="Qaytim hisoblash uchun"></label>
@@ -775,6 +778,9 @@ function payModal(order, onPaid) {
       $("#to-pay", modal).textContent = money(total());
       $("#cash-box", modal).classList.toggle("hidden", method !== "cash");
       $("#debt-box", modal).classList.toggle("hidden", method !== "debt");
+      $("#customer-label", modal).innerHTML = method === "debt" ? "Mijoz <b>(qarzga yoziladi)</b>"
+        : "Mijoz <i>(ixtiyoriy — tanlansa savdo mijozga yoziladi)</i>";
+      $("#tg-note", modal).classList.toggle("hidden", !(customer && customer.telegram_chat_id));
       const given = +$("#given", modal).value || 0;
       $("#change", modal).textContent = method === "cash" && given
         ? (given >= total() ? "Qaytim: " + money(given - total()) : "Yetmaydi: " + money(total() - given))
@@ -787,18 +793,16 @@ function payModal(order, onPaid) {
     }));
     $("#discount", modal).addEventListener("input", update);
     $("#given", modal).addEventListener("input", update);
-    customerPicker($("#customer-picker", modal), (c) => { customer = c; });
+    customerPicker($("#customer-picker", modal), (c) => { customer = c; update(); });
     $("#confirm-pay", modal).addEventListener("click", safe(async () => {
       const body = { method, discount: +$("#discount", modal).value || 0 };
-      if (method === "debt") {
-        if (!customer) throw new Error("Qarzga yozish uchun mijozni tanlang");
-        body.customer_id = customer.id;
-        body.due_date = $("#due-date", modal).value;
-      }
+      if (method === "debt" && !customer) throw new Error("Qarzga yozish uchun mijozni tanlang");
+      if (customer) body.customer_id = customer.id;
+      if (method === "debt") body.due_date = $("#due-date", modal).value;
       const paid = await api("POST", `/api/orders/${order.id}/pay`, body);
       const shouldPrint = $("#print-after", modal).checked;
       closeModal();
-      toast("To'lov qabul qilindi ✅");
+      toast(paid.customer_notified ? "To'lov qabul qilindi ✅ Chek mijozga Telegram'da yuborildi" : "To'lov qabul qilindi ✅");
       onPaid(paid);
       if (shouldPrint) printReceipt(paid);
     }));
@@ -816,7 +820,8 @@ function printReceipt(order) {
     <table>
       ${order.items.map((i) => `
         <tr><td colspan="2">${esc(i.name)}</td></tr>
-        <tr><td>${i.qty} x ${money(i.price)}</td><td style="text-align:right">${money(i.qty * i.price)}</td></tr>`).join("")}
+        <tr><td>${i.qty} x ${money(i.price)}</td><td style="text-align:right">${money(i.qty * i.price)}</td></tr>
+        ${i.returned_qty ? `<tr><td colspan="2">  qaytarildi: ${i.returned_qty}</td></tr>` : ""}`).join("")}
     </table>
     <hr>
     <table>
@@ -824,36 +829,171 @@ function printReceipt(order) {
       ${order.service ? `<tr><td>Xizmat haqi ${percent(order.service_percent)}</td><td style="text-align:right">+${money(order.service)}</td></tr>` : ""}
       ${order.discount ? `<tr><td>Chegirma</td><td style="text-align:right">-${money(order.discount)}</td></tr>` : ""}
       <tr><td><b>JAMI</b></td><td style="text-align:right"><b>${money(order.total)}</b></td></tr>
+      ${order.returned ? `<tr><td>Qaytarildi</td><td style="text-align:right">-${money(order.returned)}</td></tr>
+        <tr><td><b>YAKUNIY</b></td><td style="text-align:right"><b>${money(order.total - order.returned)}</b></td></tr>` : ""}
       ${order.payment_method ? `<tr><td>To'lov</td><td style="text-align:right">${METHOD_NAMES[order.payment_method]}</td></tr>` : ""}
     </table>
     <hr>
-    <div class="c">${order.status === "paid" ? "Xaridingiz uchun rahmat!" : "Hisob (to'lanmagan)"}</div>`;
+    <div class="c">${order.status === "paid" ? "Xaridingiz uchun rahmat!" : order.status === "refunded"
+      ? "BEKOR QILINGAN CHEK" : "Hisob (to'lanmagan)"}</div>`;
   window.print();
 }
 
-// ------------------------------------------------------------ kassa
 
-async function viewCashier() {
-  const orders = await api("GET", "/api/orders?status=open");
-  const view = layout(`
-    <div class="toolbar"><h2>Kassa · ochiq buyurtmalar</h2></div>
-    <div class="panel">
-      <table class="list">
-        <thead><tr><th>#</th><th>Joy</th><th>Ofitsiant</th><th>Vaqt</th><th class="right">Summa</th></tr></thead>
-        <tbody>
-          ${orders.map((o) => `
-            <tr class="clickable" data-id="${o.id}">
-              <td>${o.id}</td>
-              <td>${esc(place(o))}</td>
-              <td>${esc(o.waiter_name || "-")}</td>
-              <td>${time(o.created_at)}</td>
-              <td class="right"><b>${money(o.total)}</b></td>
-            </tr>`).join("") || `<tr><td colspan="5" class="muted">Ochiq buyurtmalar yo'q</td></tr>`}
-        </tbody>
+// ------------------------------------------------------------ savdolar (barcha cheklar)
+
+const SALE_STATUS = { paid: ["ok", "Sotilgan"], refunded: ["off", "Bekor qilingan"] };
+
+function saleStatusBadge(s) {
+  if (s.status === "paid" && s.returned > 0) return `<span class="badge warn">Qisman qaytarilgan</span>`;
+  const [cls, name] = SALE_STATUS[s.status] || ["", s.status];
+  return `<span class="badge ${cls}">${name}</span>`;
+}
+
+async function saleModal(id, onChange) {
+  const s = await api("GET", `/api/sales/${id}`);
+  const net = s.total - s.returned;
+  const itemsHtml = (returnMode) => s.items.map((i) => {
+    const left = i.qty - i.returned_qty;
+    return `
+      <tr class="${left === 0 ? "cancelled" : ""}">
+        <td>${esc(i.name)}${i.returned_qty ? `<small class="amount-out"> · ${i.returned_qty} ta qaytarilgan</small>` : ""}</td>
+        <td class="right nowrap">${i.qty} × ${money(i.price)}</td>
+        <td class="right nowrap">${money(i.qty * i.price)}</td>
+        ${returnMode ? `<td class="right">${left ? `<input type="number" class="ret-qty" data-item="${i.id}" data-price="${i.price}"
+          min="0" max="${left}" value="0" style="width:70px">` : ""}</td>` : ""}
+      </tr>`;
+  }).join("");
+  const render = (returnMode) => `
+    <div class="sale-receipt">
+      <div class="modal-head"><h2>Chek #${s.id} ${saleStatusBadge(s)}</h2>
+        <button type="button" class="icon-btn" data-close>✕</button></div>
+      <div class="jd-meta">
+        <div><small>Vaqti</small><b>${esc(s.closed_at || "")}</b></div>
+        <div><small>Joy</small><b>${esc(place(s))}</b><span class="muted">${esc(s.waiter_name || "")}</span></div>
+        <div><small>Kassir</small><b>${esc(s.cashier_name || "—")}</b>
+          ${s.customer_name ? `<span class="muted">Mijoz: ${esc(s.customer_name)}</span>` : ""}</div>
+      </div>
+      <table class="list sale-items">
+        <thead><tr><th>Taom</th><th class="right">Soni × narx</th><th class="right">Summa</th>${returnMode ? `<th class="right">Qaytarish</th>` : ""}</tr></thead>
+        <tbody>${itemsHtml(returnMode)}</tbody>
       </table>
+      <div class="sale-totals">
+        ${s.service || s.discount ? `<div><span>Taomlar</span><b>${money(s.subtotal)}</b></div>` : ""}
+        ${s.service ? `<div><span>Xizmat haqi ${percent(s.service_percent)}</span><b>+${money(s.service)}</b></div>` : ""}
+        ${s.discount ? `<div><span>Chegirma</span><b>−${money(s.discount)}</b></div>` : ""}
+        <div class="grand"><span>Jami</span><b>${money(s.total)}</b></div>
+        ${s.returned ? `<div class="amount-out"><span>Qaytarilgan</span><b>−${money(s.returned)}</b></div>
+          <div class="grand"><span>Yakuniy</span><b>${money(net)}</b></div>` : ""}
+        <div><span>To'lov</span><b>${METHOD_NAMES[s.payment_method] || s.payment_method}${s.due_date ? ` · muddat ${esc(s.due_date)}` : ""}</b></div>
+      </div>
+      ${s.returns.length ? `<h3>Qaytarishlar</h3>${s.returns.map((r) => `
+        <div class="return-row"><div><b>${money(r.amount)}</b> · ${r.items.map((x) => `${esc(x.name)} × ${x.qty}`).join(", ")}
+          <small class="muted">${esc(r.created_at.slice(0, 16))} · ${esc(r.user_name || "")}${r.reason ? " · " + esc(r.reason) : ""}</small></div></div>`).join("")}` : ""}
+      ${s.status === "refunded" ? `<div class="notice error-notice">Bekor qilingan: ${esc(s.refunded_at || "")} · ${esc(s.refunded_by_name || "")}
+        ${s.refund_reason ? " · " + esc(s.refund_reason) : ""}</div>` : ""}
+      ${returnMode ? `
+        <label><span>Qaytarish sababi</span><input id="ret-reason" placeholder="Masalan: taom sovuq edi"></label>
+        <div class="ret-preview" id="ret-preview"></div>
+        <div class="actions"><button type="button" class="btn" id="ret-back">Orqaga</button>
+          <button type="button" class="btn primary" id="ret-confirm">Qaytarishni tasdiqlash</button></div>` : `
+        <div class="actions sale-actions">
+          ${s.can_manage && s.status === "paid" ? `
+            <button type="button" class="btn danger-text" id="sale-cancel">Bekor qilish</button>
+            ${s.items.some((i) => i.qty > i.returned_qty) ? `<button type="button" class="btn" id="sale-return">↩️ Qaytarish</button>` : ""}` : ""}
+          <button type="button" class="btn primary" id="sale-print">🖨 Chek chiqarish</button>
+        </div>`}
+    </div>`;
+  const mount = (returnMode) => {
+    openModal(render(returnMode), (m) => {
+      if (!returnMode) {
+        $("#sale-print", m).addEventListener("click", () => printReceipt(s));
+        const ret = $("#sale-return", m);
+        if (ret) ret.addEventListener("click", () => mount(true));
+        const cancel = $("#sale-cancel", m);
+        if (cancel) cancel.addEventListener("click", safe(async () => {
+          const reason = prompt(`Chek #${s.id} to'liq bekor qilinadi — ${money(net)} ${s.payment_method === "debt"
+            ? "qarzdan olib tashlanadi" : "kassadan qaytariladi"}.\nChek o'chirilmaydi, tarixda qoladi.\n\nSababini yozing:`);
+          if (reason === null) return;
+          await api("POST", `/api/finance/sales/${s.id}/cancel`, { reason });
+          toast("Chek bekor qilindi");
+          if (onChange) await onChange();
+          saleModal(s.id, onChange);
+        }));
+        return;
+      }
+      const preview = () => {
+        let value = 0;
+        $$(".ret-qty", m).forEach((i) => { value += (+i.value || 0) * +i.dataset.price; });
+        const approx = s.subtotal ? Math.round(value * s.total / s.subtotal) : 0;
+        $("#ret-preview", m).innerHTML = value
+          ? `Qaytariladigan summa: <b>${money(Math.min(approx, net))}</b>${s.discount || s.service ? " <small class='muted'>(chegirma/xizmat haqi ulushi bilan)</small>" : ""}`
+          : `<span class="muted">Qaytariladigan taom sonini kiriting</span>`;
+      };
+      $$(".ret-qty", m).forEach((i) => i.addEventListener("input", preview));
+      preview();
+      $("#ret-back", m).addEventListener("click", () => mount(false));
+      $("#ret-confirm", m).addEventListener("click", safe(async () => {
+        const items = $$(".ret-qty", m).filter((i) => +i.value > 0).map((i) => ({ item_id: +i.dataset.item, qty: +i.value }));
+        const res = await api("POST", `/api/sales/${s.id}/return`, { items, reason: $("#ret-reason", m).value });
+        toast(`Qaytarildi: ${money(res.amount)} ✅`);
+        if (onChange) await onChange();
+        saleModal(s.id, onChange);
+      }));
+    });
+  };
+  mount(false);
+}
+
+async function viewSales() {
+  const hash = location.hash.split("?")[0];
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const q = new URLSearchParams();
+  ["from", "to", "status", "method", "q"].forEach((k) => { if (params.get(k)) q.set(k, params.get(k)); });
+  const d = await api("GET", "/api/sales?" + q.toString());
+  const sel = (name, options, value) => `<select name="${name}" style="width:auto">${options.map(([k, v]) =>
+    `<option value="${k}" ${k === (value || "") ? "selected" : ""}>${v}</option>`).join("")}</select>`;
+  const view = layout(`
+    <div class="toolbar"><h2>Savdolar</h2><span class="muted">${d.sales.length} ta chek</span></div>
+    <form class="filters" id="filters">
+      <input type="date" name="from" value="${d.from}" style="width:auto">
+      <input type="date" name="to" value="${d.to}" style="width:auto">
+      ${sel("status", [["", "Barcha cheklar"], ["paid", "Sotilgan"], ["returned", "Qaytarish bo'lgan"], ["refunded", "Bekor qilingan"]], params.get("status"))}
+      ${sel("method", [["", "Barcha to'lovlar"], ...Object.keys(METHOD_NAMES).map((k) => [k, METHOD_NAMES[k]])], params.get("method"))}
+      <input type="search" name="q" placeholder="Chek # yoki mijoz" value="${esc(params.get("q") || "")}" style="width:180px">
+      <button class="btn primary">Ko'rsatish</button>
+    </form>
+    <div class="finance-totals">
+      <div><span class="muted">Cheklar</span><b>${d.totals.count}</b></div>
+      <div><span class="muted">Tushum</span><b class="amount-in">${money(d.totals.revenue)}</b></div>
+      <div><span class="muted">Qaytarilgan</span><b class="amount-out">${money(d.totals.returned)}</b></div>
+      <div><span class="muted">Bekor qilingan</span><b class="amount-out">${money(d.totals.refunded)}</b></div>
+    </div>
+    <div class="panel">
+      ${d.sales.length ? `<div class="table-scroll"><table class="list sales-table">
+        <thead><tr><th>Chek</th><th>Vaqt</th><th>Joy</th><th>Mijoz</th><th>Kassir</th><th>To'lov</th>
+          <th class="right">Summa</th><th>Holati</th></tr></thead>
+        <tbody>${d.sales.map((s) => `
+          <tr class="clickable ${s.status === "refunded" ? "cancelled" : ""}" data-id="${s.id}">
+            <td><b>#${s.id}</b></td>
+            <td class="nowrap">${esc(s.closed_at.slice(0, 16))}</td>
+            <td>${esc(place(s))}</td>
+            <td>${esc(s.customer_name || "")}</td>
+            <td class="muted">${esc(s.cashier_name || "")}</td>
+            <td>${METHOD_NAMES[s.payment_method] || ""}</td>
+            <td class="right nowrap"><b>${money(s.total - s.returned)}</b>${s.returned ? `<br><small class="muted"><s>${money(s.total)}</s></small>` : ""}</td>
+            <td>${saleStatusBadge(s)}</td>
+          </tr>`).join("")}</tbody>
+      </table></div>` : `<p class="muted">Tanlangan davrda savdolar yo'q</p>`}
     </div>`);
-  $$("tr[data-id]", view).forEach((tr) =>
-    tr.addEventListener("click", () => (location.hash = "#/order/" + tr.dataset.id)));
+  $("#filters", view).addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = new URLSearchParams();
+    new FormData(e.target).forEach((v, k) => { if (v) f.set(k, v); });
+    go(hash + "?" + f.toString());
+  });
+  $$("tr[data-id]", view).forEach((tr) => tr.addEventListener("click", () =>
+    saleModal(tr.dataset.id, () => viewSales()).catch((e) => toast(e.message, true))));
 }
 
 // ------------------------------------------------------------ bosh sahifa
@@ -1076,7 +1216,7 @@ function customerPicker(root, onSelect) {
       if (!q) { results.innerHTML = ""; return; }
       const list = await api("GET", "/api/customers?q=" + encodeURIComponent(q));
       results.innerHTML = list.slice(0, 6).map((c) => `
-        <button type="button" data-id="${c.id}"><b>${esc(c.name)}</b><span>${esc(formatPhone(c.phone))}</span>
+        <button type="button" data-id="${c.id}"><b>${esc(c.name)}${c.telegram_chat_id ? ` <span class="tg-mark" title="Telegram botga ulangan">${icon("telegram")}</span>` : ""}</b><span>${esc(formatPhone(c.phone))}</span>
           ${c.debt > 0 ? `<em>qarz ${money(c.debt)}</em>` : ""}</button>`).join("") || `<p class="muted">Topilmadi</p>`;
       $$("[data-id]", results).forEach((b) => b.addEventListener("click", () => choose(list.find((c) => c.id === +b.dataset.id))));
     }), 250);
@@ -1131,8 +1271,10 @@ async function viewCustomers() {
         <div class="customer-head">
           <div class="avatar big gender-${d.gender}">${esc(d.name[0] || "?").toUpperCase()}</div>
           <div><h2>${esc(d.name)}</h2>
-            <div class="muted">${esc(formatPhone(d.phone))} · ${GENDERS[d.gender]} · ${esc(d.created_at.slice(0, 10))} dan mijoz</div></div>
+            <div class="muted">${esc(formatPhone(d.phone))} · ${GENDERS[d.gender]} · ${esc(d.created_at.slice(0, 10))} dan mijoz</div>
+            ${d.telegram_chat_id ? `<span class="badge tg-badge">${icon("telegram")} Telegram botga ulangan</span>` : ""}</div>
           <button class="btn small" id="edit-customer">✏️ Tahrirlash</button>
+          ${d.telegram_chat_id ? `<button class="btn small" id="msg-customer" title="Telegram bot orqali xabar">${icon("telegram")} Xabar</button>` : ""}
         </div>
         <div class="debt-summary">
           <div><span class="muted">Jami qarz</span><b>${money(d.total_debt)}</b></div>
@@ -1167,6 +1309,7 @@ async function viewCustomers() {
     <div class="crm-layout">
       <div class="panel customer-list">
         <div class="toolbar"><h2 style="flex:1">Mijozlar</h2>
+          <button class="btn small" id="message-customers" title="Mijozlarga Telegram xabar">${icon("telegram")}</button>
           <button class="btn small" id="import-customers" title="Import">${icon("upload")}</button>
           <button class="btn primary small" id="new-customer">+ Yangi</button></div>
         <form id="search" class="picker-search">${icon("search")}<input name="q" value="${esc(q)}" placeholder="Ism yoki telefon"></form>
@@ -1174,7 +1317,7 @@ async function viewCustomers() {
           ${list.map((c) => `
             <button class="customer-item ${c.id === selectedId ? "active" : ""}" data-id="${c.id}">
               <span class="avatar gender-${c.gender}">${esc(c.name[0] || "?").toUpperCase()}</span>
-              <span class="ci-body"><b>${esc(c.name)}</b><small>${esc(formatPhone(c.phone))}</small></span>
+              <span class="ci-body"><b>${esc(c.name)}${c.telegram_chat_id ? ` <span class="tg-mark">${icon("telegram")}</span>` : ""}</b><small>${esc(formatPhone(c.phone))}</small></span>
               ${c.debt > 0 ? `<em class="amount-out">${money(c.debt)}</em>` : ""}
             </button>`).join("") || `<p class="muted">Mijozlar yo'q</p>`}
         </div>
@@ -1191,6 +1334,7 @@ async function viewCustomers() {
   });
   const newBtn = () => go("#/crm/customers?mode=new" + (q ? "&q=" + encodeURIComponent(q) : ""));
   $("#new-customer", view).addEventListener("click", newBtn);
+  $("#message-customers", view).addEventListener("click", safe(() => messageModal()));
   $("#import-customers", view).addEventListener("click", () => importModal("customers", "Mijozlarni import qilish", () => router()));
   const n2 = $("#new-customer-2", view);
   if (n2) n2.addEventListener("click", newBtn);
@@ -1210,6 +1354,8 @@ async function viewCustomers() {
   }
   if (detail && mode !== "edit") {
     $("#edit-customer", view).addEventListener("click", () => open(detail.id, "&mode=edit"));
+    const msgBtn = $("#msg-customer", view);
+    if (msgBtn) msgBtn.addEventListener("click", safe(() => messageModal([detail])));
     $("#add-debt", view).addEventListener("click", () => addDebtModal(detail, () => router()));
     $$("[data-pay]", view).forEach((b) => b.addEventListener("click", () =>
       payDebtModal(detail.debts.find((x) => x.id === +b.dataset.pay), detail, () => router())));
@@ -1548,7 +1694,8 @@ function entriesTable(entries, withCancel) {
             <td class="nowrap">${esc(e.created_at.slice(0, 16))}</td>
             <td><span class="dir-dot dir-${e.direction}">${icon(e.direction)}</span>${esc(e.type_name)}
               ${e.source === "sale" ? `<span class="badge">avtomatik</span>` : ""}
-              ${e.source === "debt" ? `<span class="badge">CRM</span>` : ""}</td>
+              ${e.source === "debt" ? `<span class="badge">CRM</span>` : ""}
+              ${e.source === "return" ? `<span class="badge">chekdan</span>` : ""}</td>
             <td>${accountName(e.account)}</td>
             <td class="muted">${esc(e.comment || "")}</td>
             <td class="muted">${esc(e.user_name || "")}</td>
@@ -1556,7 +1703,7 @@ function entriesTable(entries, withCancel) {
             <td>${e.status === "cancelled"
               ? `<span class="badge off" title="${esc((e.cancelled_by_name || "") + (e.cancel_reason ? ": " + e.cancel_reason : ""))}">Bekor qilingan</span>`
               : `<span class="badge ok">Bajarildi</span>`}</td>
-            ${withCancel ? `<td class="right">${e.status === "done"
+            ${withCancel ? `<td class="right">${e.status === "done" && e.source !== "return"
               ? `<button class="btn small danger" data-cancel="${e.id}" data-source="${e.source}"
                   data-direction="${e.direction}" data-amount="${e.amount}">Bekor qilish</button>` : ""}</td>` : ""}
           </tr>`).join("")}
@@ -2586,7 +2733,9 @@ async function viewJournal() {
 // Yangi integratsiya qo'shish: shu ro'yxatga yozuv va (tayyor bo'lsa) sahifa
 const INTEGRATIONS = [
   { key: "telegram", icon: "telegram", name: "Telegram bot", href: "#/integrations/telegram",
-    text: "Sotuv, kirim-chiqim, qarz va boshqa amallar haqida Telegram'ga xabar keladi." },
+    text: "Xodimlar uchun: sotuv, kirim-chiqim, qarz va boshqa amallar haqida Telegram'ga xabar keladi." },
+  { key: "customer_bot", icon: "crm", name: "Mijozlar boti", href: "#/integrations/customer-bot",
+    text: "Mijozlar uchun: xarid cheki, qarz balansi va siz yuborgan xabarlar Telegram'da." },
 ];
 
 async function viewIntegrations() {
@@ -2741,6 +2890,145 @@ async function viewTelegram(cfgArg) {
   }));
 }
 
+// Mijozlarga Telegram bot orqali xabar yuborish: hammaga yoki tanlanganlarga
+async function messageModal(preselected) {
+  const linked = await api("GET", "/api/customers?telegram=1");
+  if (!linked.length) {
+    toast("Hali birorta mijoz botga ulanmagan. Mijoz botni ochib telefon raqamini yuborishi kerak", true);
+    return;
+  }
+  const chosen = {};
+  (preselected || []).forEach((c) => { chosen[c.id] = true; });
+  const single = preselected && preselected.length === 1;
+  openModal(`
+    <form id="msg-form" class="message-form">
+      <div class="modal-head"><h2>${icon("telegram")} ${single ? "Xabar: " + esc(preselected[0].name) : "Mijozlarga xabar"}</h2>
+        <button type="button" class="icon-btn" data-close>✕</button></div>
+      ${single ? "" : `
+        <div class="target-pick">
+          <label><input type="radio" name="target" value="all" ${preselected ? "" : "checked"}><span>Barcha ulangan mijozlar (${linked.length} ta)</span></label>
+          <label><input type="radio" name="target" value="some" ${preselected ? "checked" : ""}><span>Tanlanganlar</span></label>
+        </div>
+        <div id="pick-box" class="${preselected ? "" : "hidden"}">
+          <div class="picker-search">${icon("search")}<input id="pick-q" placeholder="Qidirish" autocomplete="off"></div>
+          <div class="pick-list">${linked.map((c) => `
+            <label class="pick-row" data-q="${esc((c.name + " " + c.phone).toLowerCase())}">
+              <input type="checkbox" value="${c.id}" ${chosen[c.id] ? "checked" : ""}>
+              <span><b>${esc(c.name)}</b> <small class="muted">${esc(formatPhone(c.phone))}</small></span></label>`).join("")}</div>
+        </div>`}
+      <label><span>Xabar matni</span><textarea name="text" rows="5" maxlength="3500" required
+        placeholder="Masalan: Hurmatli mijoz! Bugun barcha ichimliklarga 20% chegirma 🎉"></textarea></label>
+      <div class="actions"><button type="button" class="btn" data-close>Bekor</button>
+        <button class="btn primary">${icon("telegram")} Yuborish</button></div>
+    </form>`, (m) => {
+    const box = $("#pick-box", m);
+    $$("input[name=target]", m).forEach((r) => r.addEventListener("change", () =>
+      box.classList.toggle("hidden", $("input[name=target]:checked", m).value !== "some")));
+    const q = $("#pick-q", m);
+    if (q) q.addEventListener("input", () => {
+      const v = q.value.trim().toLowerCase();
+      $$(".pick-row", m).forEach((row) => row.classList.toggle("hidden", v && row.dataset.q.indexOf(v) < 0));
+    });
+    $("textarea", m).focus();
+    $("#msg-form", m).addEventListener("submit", safe(async (e) => {
+      e.preventDefault();
+      const body = { text: e.target.text.value };
+      if (single) body.customer_ids = [preselected[0].id];
+      else if ($("input[name=target]:checked", m).value === "all") body.all = true;
+      else body.customer_ids = $$(".pick-row input:checked", m).map((i) => +i.value);
+      const res = await api("POST", "/api/customers/message", body);
+      closeModal();
+      toast(`Xabar ${res.sent} ta mijozga yuborildi ✅`);
+    }));
+  });
+}
+
+async function viewCustomerBot(cfgArg) {
+  const cfg = cfgArg || await api("GET", "/api/integrations/customer-bot");
+  const botLink = cfg.bot ? `https://t.me/${cfg.bot.username}` : "";
+  const body = !cfg.token_set ? `
+      <section class="panel tg-card">
+        <div class="tg-hero">${icon("crm")}</div>
+        <h3>Mijozlar botini ulash</h3>
+        <p class="muted">Bu — mijozlaringiz uchun <b>alohida</b> bot. Telegram'da
+          <a href="https://t.me/BotFather" target="_blank" rel="noopener"><b>@BotFather</b></a> → <b>/newbot</b>
+          (masalan "Kafe mijozlari" nomi bilan) va bergan tokenni shu yerga qo'ying.</p>
+        <form id="cb-connect" class="row-input">
+          <input id="cb-token" autocomplete="off" spellcheck="false" placeholder="123456789:AAH..." required>
+          <button class="btn primary">Ulash</button>
+        </form>
+        <h4>Mijoz botda nima ko'radi</h4>
+        <ul class="muted help-list">
+          <li>🧾 Savdoda mijoz tanlansa — xarid cheki darhol botga keladi</li>
+          <li>💰 <b>Balans</b> tugmasi — qancha qarzi borligi va to'lov muddatlari</li>
+          <li>✅ Qarz to'laganda — to'lov qabul qilingani haqida xabar</li>
+          <li>📢 Siz yuborgan xabarlar (aksiya, yangilik)</li>
+        </ul>
+      </section>` : `
+      <section class="panel tg-card">
+        <div class="tg-connected">
+          <span class="tg-hero small">${icon("crm")}</span>
+          <div><b>@${esc(cfg.bot ? cfg.bot.username : "bot")}</b>
+            <small class="muted">${cfg.enabled ? "Ishlamoqda" : "To'xtatilgan"}</small></div>
+          <label class="tg-switch"><input type="checkbox" id="cb-enabled" ${cfg.enabled ? "checked" : ""}><span class="slider"></span></label>
+        </div>
+        ${cfg.status.last_error ? `<div class="notice error-notice">⚠️ ${esc(cfg.status.last_error)}</div>` : ""}
+        <div class="cb-stats">
+          <div><b>${cfg.linked}</b><small class="muted">ulangan mijoz</small></div>
+          <div><b>${cfg.customers}</b><small class="muted">jami mijoz</small></div>
+          <div><b>${cfg.status.sent}</b><small class="muted">yuborilgan xabar</small></div>
+        </div>
+        <h4>Mijoz qanday ulanadi</h4>
+        <p class="muted">Mijoz botni ochadi → <b>Start</b> → <b>📱 Telefon raqamni yuborish</b>. Raqami CRM'dagi mijozga mos kelsa, o'zi ulanadi.
+          Havolani mijozlarga yuboring yoki kassaga QR qilib qo'ying:</p>
+        <div class="lan-url"><code>${esc(botLink)}</code>
+          <button type="button" class="btn small" data-copy="${esc(botLink)}">Nusxa olish</button></div>
+        <h4>Nimalar yuboriladi</h4>
+        <label class="perm-item"><input type="checkbox" id="cb-sales" ${cfg.notify_sales ? "checked" : ""}>
+          ${icon("sales")}<span>Xarid cheki (savdoda mijoz tanlanganda)</span></label>
+        <label class="perm-item" style="margin-top:6px"><input type="checkbox" id="cb-payments" ${cfg.notify_payments ? "checked" : ""}>
+          ${icon("debt")}<span>Qarz to'lovi qabul qilinganda</span></label>
+        <div class="actions">
+          <button type="button" class="btn danger-text" id="cb-disconnect">Uzish</button>
+          <button type="button" class="btn primary" id="cb-message">${icon("telegram")} Mijozlarga xabar yuborish</button>
+        </div>
+      </section>`;
+  const view = layout(`
+    <div class="toolbar"><a class="btn small" href="#/integrations">← Integratsiyalar</a><h2>Mijozlar boti</h2></div>
+    ${body}`);
+  const connect = $("#cb-connect", view);
+  if (connect) connect.addEventListener("submit", safe(async (e) => {
+    e.preventDefault();
+    const btn = $("button", connect);
+    btn.disabled = true;
+    try {
+      const next = await api("POST", "/api/integrations/customer-bot/connect", { token: $("#cb-token", view).value.trim() });
+      toast("Mijozlar boti ulandi ✅");
+      viewCustomerBot(next);
+    } finally { btn.disabled = false; }
+  }));
+  const save = (patch) => api("PUT", "/api/integrations/customer-bot", patch).then((next) => {
+    toast("Saqlandi");
+    viewCustomerBot(next);
+  });
+  const en = $("#cb-enabled", view);
+  if (en) en.addEventListener("change", safe(() => save({ enabled: en.checked })));
+  [["#cb-sales", "notify_sales"], ["#cb-payments", "notify_payments"]].forEach(([sel, key]) => {
+    const el = $(sel, view);
+    if (el) el.addEventListener("change", safe(() => { const p = {}; p[key] = el.checked; return save(p); }));
+  });
+  $$("[data-copy]", view).forEach((b) => b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); toast("Nusxa olindi"); } catch { toast(b.dataset.copy); }
+  }));
+  const msg = $("#cb-message", view);
+  if (msg) msg.addEventListener("click", () => messageModal());
+  const disc = $("#cb-disconnect", view);
+  if (disc) disc.addEventListener("click", safe(async () => {
+    if (!confirm("Mijozlar boti uzilsinmi? Mijozlarga xabarlar boshqa bormaydi.")) return;
+    viewCustomerBot(await api("DELETE", "/api/integrations/customer-bot"));
+  }));
+}
+
 // ------------------------------------------------------------ router
 
 const routes = [
@@ -2755,8 +3043,9 @@ const routes = [
   [/^#\/order\/(\d+)$/, viewOrder, ["tables", "cashier", "reports"]],
   [/^#\/kitchen$/, viewKitchen, ["kitchen"]],
   [/^#\/printers$/, viewPrinters, ["printers"]],
-  [/^#\/cashier$/, viewCashier, ["cashier"]],
   [/^#\/reports$/, viewReports, ["reports"]],
+  [/^#\/reports\/sales$/, viewSales, ["reports"]],
+  [/^#\/finance\/sales$/, viewSales, ["finance"]],
   [/^#\/menu$/, viewMenu, ["menu"]],
   [/^#\/tables-admin$/, viewTablesAdmin, ["halls"]],
   [/^#\/users$/, viewUsers, ["users"]],
@@ -2764,6 +3053,7 @@ const routes = [
   [/^#\/journal$/, viewJournal, ["journal"]],
   [/^#\/integrations$/, viewIntegrations, ["integrations"]],
   [/^#\/integrations\/telegram$/, viewTelegram, ["integrations"]],
+  [/^#\/integrations\/customer-bot$/, viewCustomerBot, ["integrations"]],
   [/^#\/none$/, viewNoAccess],
 ];
 

@@ -54,7 +54,12 @@ Linux/macOS: `python3 desktop.py` (yoki faqat server: `python3 server.py`)
 - 📓 **Jurnal** — barcha amallar (sotuv, taom qo'shish, kirim-chiqim, qarz, mahsulot, xodim, sozlama, tizimga kirish):
   kim, qachon va nima qilgani. Qatorni bossangiz batafsil ma'lumot ochiladi. Yozuvlar o'chirilmaydi
 - 🔌 **Integratsiyalar** — tashqi xizmatlar bilan ulanish (yangilari qo'shib boriladi):
-  - **Telegram bot** — jurnaldagi amallar tanlangan chat/guruhlarga xabar bo'lib boradi
+  - **Telegram bot** (xodimlar uchun) — jurnaldagi amallar tanlangan chat/guruhlarga xabar bo'lib boradi
+  - **Mijozlar boti** — mijoz botga telefon raqamini yuborib ulanadi; savdoda mijoz tanlansa chek darhol
+    botga boradi, **💰 Balans** tugmasida qarzi va muddatlari ko'rinadi, **🧾 Xaridlarim** — oxirgi xaridlar;
+    CRM → Mijozlar'dan barcha yoki tanlangan mijozlarga xabar yuborish mumkin
+- 🧾 **Savdolar** (Moliya va Hisobotlar ichida) — barcha cheklar: ko'rish, qayta chop etish,
+  qisman qaytarish (tanlangan taomlar, pul qaytariladi) va to'liq bekor qilish
 
 ### 🤖 Telegram botni ulash
 

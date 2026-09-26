@@ -17,7 +17,9 @@ API = os.environ.get("TELEGRAM_API", "https://api.telegram.org")
 
 
 class TelegramError(Exception):
-    pass
+    def __init__(self, message, retry=False):
+        super().__init__(message)
+        self.retry = retry  # faqat internet/ulanish xatosida qayta urinib ko'riladi
 
 
 def call(token, method, params=None, timeout=10):
@@ -34,7 +36,7 @@ def call(token, method, params=None, timeout=10):
         except ValueError:
             raise TelegramError(f"Telegram xatosi: HTTP {e.code}")
     except (urllib.error.URLError, OSError) as e:
-        raise TelegramError(f"Telegram'ga ulanib bo'lmadi (internetni tekshiring): {getattr(e, 'reason', e)}")
+        raise TelegramError(f"Telegram'ga ulanib bo'lmadi (internetni tekshiring): {getattr(e, 'reason', e)}", retry=True)
     except ValueError:
         raise TelegramError("Telegram noto'g'ri javob qaytardi")
     if not data.get("ok"):
@@ -43,6 +45,10 @@ def call(token, method, params=None, timeout=10):
             raise TelegramError("Bot tokeni noto'g'ri")
         if "chat not found" in desc:
             raise TelegramError("Chat topilmadi - botga avval /start yozing")
+        if "blocked" in desc or "deactivated" in desc:
+            raise TelegramError("Foydalanuvchi botni bloklagan")
+        if "Too Many Requests" in desc:
+            raise TelegramError("Telegram: juda ko'p xabar, biroz kuting", retry=True)
         raise TelegramError(f"Telegram: {desc}")
     return data["result"]
 
@@ -63,17 +69,23 @@ def find_chats(token):
     return list(chats.values())
 
 
-def send_message(token, chat_id, text):
-    return call(token, "sendMessage", {
-        "chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true",
-    })
+def send_message(token, chat_id, text, reply_markup=None):
+    params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"}
+    if reply_markup:
+        params["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    return call(token, "sendMessage", params)
+
+
+def get_updates(token, offset, timeout=25):
+    return call(token, "getUpdates", {"offset": offset, "timeout": timeout, "allowed_updates": '["message"]'},
+                timeout=timeout + 10)
 
 
 class Notifier:
     """Xabarlarni orqa fonda yuboradi - API so'rovlari Telegram'ni kutib qolmaydi."""
 
     def __init__(self):
-        self.queue = queue.Queue(maxsize=1000)
+        self.queue = queue.Queue(maxsize=20000)
         self.last_error = None
         self.last_ok = None
         self.sent = 0
@@ -92,7 +104,7 @@ class Notifier:
                         break
                     except TelegramError as e:
                         self.last_error = f"{time.strftime('%H:%M:%S')} · {e}"
-                        if "token" in str(e) or "topilmadi" in str(e):
+                        if not e.retry:
                             break
                         time.sleep(2 * (attempt + 1))
             self.queue.task_done()
@@ -105,8 +117,11 @@ class Notifier:
             self._thread.start()
         try:
             self.queue.put_nowait((token, list(chats), text))
+            return True
         except queue.Full:
             self.last_error = "Navbat to'lib ketdi - xabarlar yuborilmayapti"
+        return False
 
 
-notifier = Notifier()
+notifier = Notifier()  # xodimlar boti (jurnal)
+customer_notifier = Notifier()  # mijozlar boti (chek, qarz, xabarlar)

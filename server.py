@@ -225,6 +225,16 @@ CREATE TABLE IF NOT EXISTS balance_adjustments (
     created_at TEXT NOT NULL,
     created_by INTEGER REFERENCES users(id)
 );
+-- Savdodan qisman qaytarish (mijoz taomni qaytardi - pul qaytarildi). O'chirilmaydi.
+CREATE TABLE IF NOT EXISTS order_returns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES orders(id),
+    amount INTEGER NOT NULL,
+    items TEXT NOT NULL,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id)
+);
 -- Jurnal: barcha amallar (kim, qachon, nima). O'chirilmaydi.
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -262,6 +272,14 @@ MIGRATIONS = [
     ("orders", "refund_reason", "TEXT"),
     ("finance_types", "is_adjust", "INTEGER NOT NULL DEFAULT 0"),  # balans tuzatish turlari
     ("finance_entries", "supplier_id", "INTEGER REFERENCES suppliers(id)"),
+    # Qaytarilgan summa (qisman qaytarish) va qaytarilgan miqdor
+    ("orders", "returned", "INTEGER NOT NULL DEFAULT 0"),
+    ("order_items", "returned_qty", "INTEGER NOT NULL DEFAULT 0"),
+    # Savdoda tanlangan mijoz (chek mijozlar botiga boradi)
+    ("orders", "customer_id", "INTEGER REFERENCES customers(id)"),
+    # Mijozlar boti: mijoz telefon raqamini yuborib ulanadi
+    ("customers", "telegram_chat_id", "TEXT"),
+    ("customers", "telegram_linked_at", "TEXT"),
     ("users", "first_name", "TEXT"),
     ("users", "last_name", "TEXT"),
     ("users", "phone", "TEXT"),
@@ -878,8 +896,9 @@ def pay_order(conn, user, params, data, query):
         raise ApiError(400, "Chegirma summadan katta bo'lishi mumkin emas")
     order["discount"] = discount
     apply_totals(order, order["service_percent"])
+    # Mijoz ixtiyoriy (qarzga sotishda shart) - tanlansa chek mijozlar botiga boradi
+    customer = get_customer(conn, data.get("customer_id")) if data.get("customer_id") or method == "debt" else None
     if method == "debt":  # qarzga: mijoz va to'lov muddati shart
-        customer = get_customer(conn, data.get("customer_id"))
         due = parse_due_date(data.get("due_date"))
         if order["total"] <= 0:
             raise ApiError(400, "Qarzga yoziladigan summa yo'q")
@@ -890,10 +909,15 @@ def pay_order(conn, user, params, data, query):
         )
     conn.execute(
         """UPDATE orders SET status = 'paid', discount = ?, service_percent = ?, service = ?, total = ?,
-                  payment_method = ?, cashier_id = ?, closed_at = ? WHERE id = ?""",
-        (discount, order["service_percent"], order["service"], order["total"], method, user["id"], now(), params[0]),
+                  payment_method = ?, cashier_id = ?, closed_at = ?, customer_id = ? WHERE id = ?""",
+        (discount, order["service_percent"], order["service"], order["total"], method, user["id"], now(),
+         customer["id"] if customer else None, params[0]),
     )
-    return order_detail(conn, params[0])
+    paid = order_detail(conn, params[0])
+    if customer:
+        paid["customer_name"] = customer["name"]
+        paid["customer_notified"] = notify_customer(conn, customer, receipt_text(conn, paid, customer))
+    return paid
 
 
 @route("POST", r"/api/orders/(\d+)/cancel", ("cashier",))
@@ -1197,10 +1221,15 @@ def list_customers(conn, user, params, data, query):
                     AS debt
              FROM customers c"""
     args = []
+    where = []
     if q:
-        sql += " WHERE c.name LIKE ? OR c.phone LIKE ?"
+        where.append("(c.name LIKE ? OR c.phone LIKE ?)")
         digits = re.sub(r"\D", "", q)
         args = [f"%{q}%", f"%{digits or q}%"]
+    if query.get("telegram", [""])[0] == "1":  # faqat mijozlar botiga ulanganlar
+        where.append("c.telegram_chat_id IS NOT NULL")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     return rows(conn.execute(sql + " ORDER BY c.name LIMIT 500", args))
 
 
@@ -1283,6 +1312,10 @@ def pay_debt(conn, user, params, data, query):
     )
     if amount == remaining:
         conn.execute("UPDATE debts SET status = 'closed' WHERE id = ?", (debt["id"],))
+    customer = get_customer(conn, debt["customer_id"])
+    total_left = customer_remaining(conn, customer["id"])
+    notify_customer(conn, customer, f"✅ <b>To'lovingiz qabul qilindi</b>\nSumma: {fmt_money(amount)}\n"
+                    + (f"Qolgan qarzingiz: <b>{fmt_money(total_left)}</b>" if total_left > 0 else "Qarzingiz to'liq yopildi 🎉"))
     return {"ok": True, "remaining": remaining - amount, "account": DEBT_PAY_METHODS[method]}
 
 
@@ -1340,7 +1373,7 @@ def create_finance_type(conn, user, params, data, query):
 def finance_balance(conn):
     accounts = {m: {"account": m, "sales": 0, "debt": 0, "in": 0, "out": 0} for m in FINANCE_ACCOUNTS}
     for method, total in conn.execute(
-        "SELECT payment_method, COALESCE(SUM(total), 0) FROM orders WHERE status = 'paid' GROUP BY payment_method"
+        "SELECT payment_method, COALESCE(SUM(total - returned), 0) FROM orders WHERE status = 'paid' GROUP BY payment_method"
     ):
         if method in accounts:
             accounts[method]["sales"] = total
@@ -1401,10 +1434,137 @@ def cancel_finance_entry(conn, user, params, data, query):
            WHERE id = ?""",
         (now(), user["id"], (data.get("reason") or "").strip() or None, params[0]),
     )
+    order = dict(conn.execute("SELECT * FROM orders WHERE id = ?", (params[0],)).fetchone())
+    if order["customer_id"]:
+        notify_customer(conn, get_customer(conn, order["customer_id"]),
+                        f"↩️ <b>Xarid bekor qilindi</b>\nBuyurtma #{order['id']} · {fmt_money(order['total'] - order['returned'])}",
+                        "notify_sales")
     return {"ok": True}
 
 
-@route("POST", r"/api/finance/sales/(\d+)/cancel", ("finance",))
+@route("POST", r"/api/sales/(\d+)/return", ("finance", "cashier"))
+def return_sale(conn, user, params, data, query):
+    """Chekdan tanlangan taomlarni qaytarish: pul (chegirma va xizmat haqi ulushi bilan) qaytariladi."""
+    order = conn.execute("SELECT * FROM orders WHERE id = ?", (params[0],)).fetchone()
+    if not order:
+        raise ApiError(404, "Savdo topilmadi")
+    if order["status"] != "paid":
+        raise ApiError(409, "Faqat yopilgan (to'langan) savdodan qaytarish mumkin")
+    items = {i["id"]: i for i in rows(conn.execute("SELECT * FROM order_items WHERE order_id = ?", (params[0],)))}
+    subtotal = sum(i["price"] * i["qty"] for i in items.values())
+    lines, value = [], 0
+    for line in data.get("items") or []:
+        item = items.get(to_int(line.get("item_id"), "item_id"))
+        qty = to_int(line.get("qty"), "qty", 0)
+        if not item or qty == 0:
+            continue
+        if qty > item["qty"] - item["returned_qty"]:
+            raise ApiError(400, f"{item['name']}: {item['qty'] - item['returned_qty']} tadan ko'p qaytarib bo'lmaydi")
+        lines.append({"item_id": item["id"], "name": item["name"], "qty": qty, "price": item["price"]})
+        value += item["price"] * qty
+    if not lines:
+        raise ApiError(400, "Qaytariladigan taomni va sonini tanlang")
+    left = order["total"] - order["returned"]
+    all_back = all(items[l["item_id"]]["qty"] - items[l["item_id"]]["returned_qty"] == l["qty"] for l in lines) and \
+        sum(l["qty"] for l in lines) == sum(i["qty"] - i["returned_qty"] for i in items.values())
+    # chegirma va xizmat haqi ulushi hisobga olinadi; hammasi qaytsa - qolgan summa to'liq
+    amount = left if all_back else min(left, round(value * order["total"] / subtotal) if subtotal else 0)
+    if order["payment_method"] == "debt":  # qarzga sotilgan - qarz kamayadi
+        debt = conn.execute("SELECT * FROM debts WHERE order_id = ? AND status != 'cancelled'", (order["id"],)).fetchone()
+        if debt:
+            if debt["amount"] - debt_paid(conn, debt["id"]) < amount:
+                raise ApiError(409, "Qarzning to'langan qismidan ko'p qaytarib bo'lmaydi. Avval to'lovni bekor qiling")
+            conn.execute("UPDATE debts SET amount = amount - ? WHERE id = ?", (amount, debt["id"]))
+            conn.execute("UPDATE debts SET status = 'closed' WHERE id = ? AND amount <= ?", (debt["id"], debt_paid(conn, debt["id"])))
+    for l in lines:
+        conn.execute("UPDATE order_items SET returned_qty = returned_qty + ? WHERE id = ?", (l["qty"], l["item_id"]))
+    conn.execute("UPDATE orders SET returned = returned + ? WHERE id = ?", (amount, order["id"]))
+    reason = (data.get("reason") or "").strip() or None
+    cur = conn.execute(
+        "INSERT INTO order_returns (order_id, amount, items, reason, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+        (order["id"], amount, json.dumps(lines, ensure_ascii=False), reason, now(), user["id"]))
+    if order["customer_id"]:
+        notify_customer(conn, get_customer(conn, order["customer_id"]),
+                        f"↩️ <b>Qaytarish</b> · Buyurtma #{order['id']}\n"
+                        + "\n".join(f"• {html_escape(l['name'])} × {l['qty']}" for l in lines)
+                        + f"\nQaytarilgan summa: <b>{fmt_money(amount)}</b>", "notify_sales")
+    return {"id": cur.lastrowid, "amount": amount, "items": lines, "reason": reason, "order_id": order["id"]}
+
+
+# --- savdolar (barcha cheklar)
+
+
+def sale_filters(query):
+    q = lambda k, d="": (query.get(k, [d])[0] or "").strip()
+    today = datetime.now().date().isoformat()
+    date_from, date_to = q("from") or today, q("to") or today
+    for d in (date_from, date_to):
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+            raise ApiError(400, "Sana formati: YYYY-MM-DD")
+    where = ["o.status IN ('paid', 'refunded')", "o.closed_at BETWEEN ? AND ?"]
+    args = [date_from + " 00:00:00", date_to + " 23:59:59"]
+    status = q("status")
+    if status == "paid":
+        where.append("o.status = 'paid'")
+    elif status == "refunded":
+        where.append("o.status = 'refunded'")
+    elif status == "returned":
+        where.append("o.returned > 0")
+    if q("method") in PAYMENT_METHODS:
+        where.append("o.payment_method = ?")
+        args.append(q("method"))
+    if q("q"):
+        text = q("q").lstrip("#")
+        where.append("(CAST(o.id AS TEXT) = ? OR c.name LIKE ? OR c.phone LIKE ?)")
+        args += [text, f"%{text}%", f"%{re.sub(r'[^0-9]', '', text) or text}%"]
+    return date_from, date_to, " AND ".join(where), args
+
+
+@route("GET", "/api/sales", ("reports", "finance"))
+def list_sales(conn, user, params, data, query):
+    date_from, date_to, where, args = sale_filters(query)
+    sales = rows(conn.execute(
+        f"""SELECT o.id, o.type, o.status, o.total, o.returned, o.discount, o.service, o.payment_method, o.closed_at,
+                   t.name AS table_name, h.name AS hall_name, w.full_name AS waiter_name, k.full_name AS cashier_name,
+                   c.name AS customer_name,
+                   (SELECT COALESCE(SUM(qty), 0) FROM order_items WHERE order_id = o.id) AS items
+            FROM orders o
+            LEFT JOIN tables t ON t.id = o.table_id LEFT JOIN halls h ON h.id = t.hall_id
+            LEFT JOIN users w ON w.id = o.waiter_id LEFT JOIN users k ON k.id = o.cashier_id
+            LEFT JOIN customers c ON c.id = o.customer_id
+            WHERE {where} ORDER BY o.closed_at DESC, o.id DESC LIMIT 2000""", args))
+    paid = [x for x in sales if x["status"] == "paid"]
+    return {
+        "from": date_from, "to": date_to, "sales": sales,
+        "totals": {"count": len(paid), "revenue": sum(x["total"] - x["returned"] for x in paid),
+                   "returned": sum(x["returned"] for x in paid),
+                   "refunded": sum(x["total"] for x in sales if x["status"] == "refunded")},
+    }
+
+
+@route("GET", r"/api/sales/(\d+)", ("reports", "finance", "cashier"))
+def sale_detail(conn, user, params, data, query):
+    order = order_detail(conn, params[0])
+    if order["status"] not in ("paid", "refunded"):
+        raise ApiError(404, "Savdo topilmadi")
+    order["items"] = rows(conn.execute(
+        "SELECT id, name, price, qty, returned_qty FROM order_items WHERE order_id = ? AND qty > 0 ORDER BY id", (params[0],)))
+    extra = one(conn, """SELECT k.full_name AS cashier_name, r.full_name AS refunded_by_name,
+                                c.name AS customer_name, c.phone AS customer_phone
+                         FROM orders o LEFT JOIN users k ON k.id = o.cashier_id LEFT JOIN users r ON r.id = o.refunded_by
+                         LEFT JOIN customers c ON c.id = o.customer_id WHERE o.id = ?""", params[0])
+    order.update(extra)
+    order["returns"] = rows(conn.execute(
+        """SELECT r.*, u.full_name AS user_name FROM order_returns r LEFT JOIN users u ON u.id = r.created_by
+           WHERE r.order_id = ? ORDER BY r.id""", (params[0],)))
+    for r in order["returns"]:
+        r["items"] = json.loads(r["items"])
+    order["due_date"] = one(conn, "SELECT due_date FROM debts WHERE order_id = ? ORDER BY id DESC", params[0]).get("due_date")
+    order["can_manage"] = bool({"finance", "cashier"} & set(user["permissions"]))
+    return order
+
+
+@route("POST", r"/api/finance/sales/(\d+)/cancel", ("finance", "cashier"))
 def cancel_sale(conn, user, params, data, query):
     """Savdoni bekor qilish (pulni qaytarish): buyurtma 'refunded' bo'ladi - tushum va balansdan chiqadi.
     Buyurtma o'chirilmaydi, tarixda qoladi."""
@@ -1464,6 +1624,16 @@ def list_finance_entries(conn, user, params, data, query):
                LEFT JOIN users ru ON ru.id = o.refunded_by
                WHERE o.status IN ('paid', 'refunded') AND o.payment_method != 'debt'
                  AND o.closed_at BETWEEN ? AND ?""", rng)]
+    if source in ("all", "sales") and direction in ("", "out"):
+        # Qisman qaytarishlar - pul kassadan chiqdi (savdo bekor qilinsa, savdo o'zi ham hisobdan chiqadi)
+        entries += [dict(r, source="return", direction="out", type_name="Savdodan qaytarish") for r in conn.execute(
+            """SELECT r.id, o.payment_method AS account, r.amount, r.created_at,
+                      'Buyurtma #' || o.id || COALESCE(' · ' || r.reason, '') AS comment, u.full_name AS user_name,
+                      CASE o.status WHEN 'paid' THEN 'done' ELSE 'cancelled' END AS status,
+                      NULL AS cancelled_at, NULL AS cancel_reason, NULL AS cancelled_by_name
+               FROM order_returns r JOIN orders o ON o.id = r.order_id
+               LEFT JOIN users u ON u.id = r.created_by
+               WHERE o.payment_method != 'debt' AND r.created_at BETWEEN ? AND ?""", rng)]
     if source in ("all", "debts") and direction in ("", "in"):
         entries += [dict(r, source="debt", direction="in", type_name="Qarz to'lovi") for r in conn.execute(
             """SELECT p.id, p.account, p.amount, p.created_at, p.status, p.cancelled_at, p.cancel_reason,
@@ -1821,7 +1991,7 @@ def period_range(period, today):
 
 def paid_between(conn, start, end, extra="", args=()):
     return conn.execute(
-        f"""SELECT {extra or "COUNT(*) AS orders, COALESCE(SUM(total), 0) AS revenue"}
+        f"""SELECT {extra or "COUNT(*) AS orders, COALESCE(SUM(total - returned), 0) AS revenue"}
             FROM orders o WHERE o.status = 'paid' AND o.closed_at BETWEEN ? AND ?""",
         (f"{start} 00:00:00", f"{end} 23:59:59", *args),
     )
@@ -1842,7 +2012,7 @@ def dashboard(conn, user, params, data, query):
     summary = dict(paid_between(conn, start, end).fetchone())
     summary["average"] = summary["revenue"] // summary["orders"] if summary["orders"] else 0
     summary["items"] = conn.execute(
-        f"""SELECT COALESCE(SUM(i.qty), 0) FROM order_items i JOIN orders o ON o.id = i.order_id
+        f"""SELECT COALESCE(SUM(i.qty - i.returned_qty), 0) FROM order_items i JOIN orders o ON o.id = i.order_id
             WHERE {where}""", rng,
     ).fetchone()[0]
     summary["cancelled"] = conn.execute(
@@ -1852,7 +2022,7 @@ def dashboard(conn, user, params, data, query):
 
     by_method = {m: 0 for m in PAYMENT_METHODS}
     for r in conn.execute(
-        f"SELECT payment_method, SUM(total) FROM orders o WHERE {where} GROUP BY payment_method", rng
+        f"SELECT payment_method, SUM(total - returned) FROM orders o WHERE {where} GROUP BY payment_method", rng
     ):
         by_method[r[0]] = r[1]
 
@@ -1870,7 +2040,7 @@ def dashboard(conn, user, params, data, query):
         keys = [d.isoformat() for d in dates]
         labels = [WEEKDAYS[d.weekday()] if period == "week" else str(d.day) for d in dates]
     values = {r[0]: r[1] for r in conn.execute(
-        f"SELECT {bucket} AS k, SUM(total) FROM orders o WHERE {where} GROUP BY k", rng
+        f"SELECT {bucket} AS k, SUM(total - returned) FROM orders o WHERE {where} GROUP BY k", rng
     )}
     series = [{"label": lab, "value": values.get(k, 0) or 0} for k, lab in zip(keys, labels)]
 
@@ -1901,7 +2071,7 @@ def report(conn, user, params, data, query):
     where = "o.status = 'paid' AND o.closed_at BETWEEN ? AND ?"
     summary = dict(
         conn.execute(
-            f"""SELECT COUNT(*) AS orders, COALESCE(SUM(total), 0) AS revenue,
+            f"""SELECT COUNT(*) AS orders, COALESCE(SUM(total - returned), 0) AS revenue,
                        COALESCE(SUM(discount), 0) AS discount, COALESCE(SUM(service), 0) AS service
                 FROM orders o WHERE {where}""",
             rng,
@@ -1909,7 +2079,7 @@ def report(conn, user, params, data, query):
     )
     summary["average"] = summary["revenue"] // summary["orders"] if summary["orders"] else 0
     summary["cost"] = conn.execute(
-        f"""SELECT COALESCE(SUM(i.cost * i.qty), 0) FROM order_items i
+        f"""SELECT COALESCE(SUM(i.cost * (i.qty - i.returned_qty)), 0) FROM order_items i
             JOIN orders o ON o.id = i.order_id WHERE {where}""",
         rng,
     ).fetchone()[0]
@@ -1920,15 +2090,15 @@ def report(conn, user, params, data, query):
         "summary": summary,
         "by_method": rows(
             conn.execute(
-                f"""SELECT payment_method AS method, COUNT(*) AS orders, SUM(total) AS revenue
+                f"""SELECT payment_method AS method, COUNT(*) AS orders, SUM(total - returned) AS revenue
                     FROM orders o WHERE {where} GROUP BY payment_method ORDER BY revenue DESC""",
                 rng,
             )
         ),
         "top_products": rows(
             conn.execute(
-                f"""SELECT i.name, SUM(i.qty) AS qty, SUM(i.qty * i.price) AS revenue,
-                           SUM(i.qty * (i.price - i.cost)) AS profit
+                f"""SELECT i.name, SUM(i.qty - i.returned_qty) AS qty, SUM((i.qty - i.returned_qty) * i.price) AS revenue,
+                           SUM((i.qty - i.returned_qty) * (i.price - i.cost)) AS profit
                     FROM order_items i JOIN orders o ON o.id = i.order_id
                     WHERE {where} AND i.qty > 0 GROUP BY i.name ORDER BY qty DESC LIMIT 10""",
                 rng,
@@ -1936,7 +2106,7 @@ def report(conn, user, params, data, query):
         ),
         "by_waiter": rows(
             conn.execute(
-                f"""SELECT COALESCE(u.full_name, '-') AS name, COUNT(*) AS orders, SUM(o.total) AS revenue
+                f"""SELECT COALESCE(u.full_name, '-') AS name, COUNT(*) AS orders, SUM(o.total - o.returned) AS revenue
                     FROM orders o LEFT JOIN users u ON u.id = o.waiter_id
                     WHERE {where} GROUP BY o.waiter_id ORDER BY revenue DESC""",
                 rng,
@@ -2227,10 +2397,14 @@ def _a_pay(ctx):
               ["Xizmat haqi", f"{fmt_money(o['service'])} ({o['service_percent']:g}%)" if o.get("service") else None],
               ["Chegirma", fmt_money(o["discount"]) if o.get("discount") else None],
               ["Jami", fmt_money(o["total"])], ["To'lov usuli", ACCOUNT_NAMES.get(o["payment_method"])]]
+    if o.get("customer_id"):
+        c = one(ctx.conn, "SELECT name, phone FROM customers WHERE id = ?", o["customer_id"])
+        fields.append(["Mijoz", f"{c.get('name', '')} {c.get('phone', '')}".strip()])
+        if o.get("customer_notified"):
+            fields.append(["Chek", "mijozning Telegram'iga yuborildi"])
     if o["payment_method"] == "debt":
-        debt = one(ctx.conn, """SELECT d.due_date, c.name, c.phone FROM debts d JOIN customers c ON c.id = d.customer_id
-                                WHERE d.order_id = ? ORDER BY d.id DESC""", o["id"])
-        fields += [["Mijoz", f"{debt.get('name', '')} {debt.get('phone', '')}".strip()], ["To'lov muddati", debt.get("due_date")]]
+        debt = one(ctx.conn, "SELECT due_date FROM debts WHERE order_id = ? ORDER BY id DESC", o["id"])
+        fields.append(["To'lov muddati", debt.get("due_date")])
     items = [{"name": i["name"], "qty": i["qty"], "price": i["price"]} for i in o["items"]]
     return entry("Sotuv", f"Buyurtma #{o['id']} · {order_place(o)} · {fmt_money(o['total'])} · "
                  f"{ACCOUNT_NAMES.get(o['payment_method'], o['payment_method'])}", fields, items, f"order:{o['id']}")
@@ -2463,6 +2637,12 @@ AUDIT = {
     "pay_order": ("sales", _a_pay),
     "cancel_order": ("sales", _a_cancel_order),
     "cancel_sale": ("sales", _a_cancel_sale),
+    "return_sale": ("sales", lambda ctx: entry(
+        "Savdodan qaytarish", f"Buyurtma #{ctx.result['order_id']} · {fmt_money(ctx.result['amount'])} qaytarildi",
+        [["Buyurtma", f"#{ctx.result['order_id']}"], ["Qaytarilgan summa", fmt_money(ctx.result["amount"])],
+         ["Sabab", ctx.result.get("reason")]],
+        [{"name": l["name"], "qty": l["qty"], "price": l["price"]} for l in ctx.result["items"]],
+        f"order:{ctx.result['order_id']}")),
     "create_finance_type": ("finance", lambda ctx: entry(
         "Tranzaksiya turi yaratildi", f"{clean_name(ctx.data.get('name'))} ({'Kirim' if ctx.data.get('direction') == 'in' else 'Chiqim'})",
         [["Nomi", clean_name(ctx.data.get("name"))], ["Yo'nalishi", "Kirim" if ctx.data.get("direction") == "in" else "Chiqim"]])),
@@ -2484,6 +2664,10 @@ AUDIT = {
     "delete_user": ("users", lambda ctx: entry(
         "Xodim bloklandi", f"{ctx.before.get('full_name')} ({ctx.before.get('username')})",
         [["Xodim", ctx.before.get("full_name")], ["Login", ctx.before.get("username")]], entity=f"user:{ctx.params[0]}")),
+    "send_customer_message": ("crm", lambda ctx: entry(
+        "Mijozlarga Telegram xabar yuborildi", f"{ctx.result['sent']} ta mijozga: {ctx.data.get('text', '')[:80]}",
+        [["Kimga", "barcha ulangan mijozlar" if ctx.data.get("all") else ", ".join(ctx.result["names"])],
+         ["Soni", ctx.result["sent"]], ["Xabar", ctx.data.get("text")]])),
     "save_telegram": ("settings", lambda ctx: entry(
         "Telegram bot sozlamalari saqlandi", "yoqildi" if ctx.result.get("enabled") else "o'chirildi",
         [["Holati", "yoqilgan" if ctx.result.get("enabled") else "o'chirilgan"],
@@ -2623,7 +2807,9 @@ def telegram_public(conn):
 @route("GET", "/api/integrations", ("integrations",))
 def list_integrations(conn, user, params, data, query):
     enabled, cfg = get_integration(conn, "telegram")
-    return [{"key": "telegram", "enabled": enabled, "configured": bool(cfg.get("token") and cfg.get("chats"))}]
+    c_enabled, c_cfg = get_integration(conn, "customer_bot")
+    return [{"key": "telegram", "enabled": enabled, "configured": bool(cfg.get("token") and cfg.get("chats"))},
+            {"key": "customer_bot", "enabled": c_enabled, "configured": bool(c_cfg.get("token"))}]
 
 
 @route("GET", "/api/integrations/telegram", ("integrations",))
@@ -2817,6 +3003,278 @@ def disconnect_telegram(conn, user, params, data, query):
     return telegram_public(conn)
 
 
+# --- mijozlar boti: mijoz telefon raqamini yuborib ulanadi, balansini ko'radi, chek va xabarlar oladi
+
+OUTBOX = threading.local()  # so'rov davomida yig'iladi, commit'dan keyin yuboriladi
+CUSTOMER_BOT_DEFAULTS = {"notify_sales": True, "notify_payments": True}
+BTN_BALANCE, BTN_ORDERS = "💰 Balans", "🧾 Xaridlarim"
+MAIN_KEYBOARD = {"keyboard": [[{"text": BTN_BALANCE}, {"text": BTN_ORDERS}]], "resize_keyboard": True}
+CONTACT_KEYBOARD = {"keyboard": [[{"text": "📱 Telefon raqamni yuborish", "request_contact": True}]],
+                    "resize_keyboard": True, "one_time_keyboard": True}
+
+
+def customer_bot_config(conn):
+    enabled, cfg = get_integration(conn, "customer_bot")
+    for k, v in CUSTOMER_BOT_DEFAULTS.items():
+        cfg.setdefault(k, v)
+    return enabled, cfg
+
+
+def notify_customer(conn, customer, text, kind=None):
+    """Mijoz botga ulangan bo'lsa xabarni navbatga qo'yadi (commit'dan keyin yuboriladi)."""
+    if not customer or not customer.get("telegram_chat_id"):
+        return False
+    enabled, cfg = customer_bot_config(conn)
+    if not enabled or not cfg.get("token"):
+        return False
+    if kind and not cfg.get(kind, True):
+        return False
+    items = getattr(OUTBOX, "items", None)
+    message = (cfg["token"], [customer["telegram_chat_id"]], text)
+    if items is None:  # so'rovdan tashqarida (masalan, testda) - darhol navbatga
+        telegram.customer_notifier.send(*message)
+    else:
+        items.append(message)
+    return True
+
+
+def fmt_date(value):
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").strftime("%d.%m.%Y") + value[10:16]
+    except (TypeError, ValueError):
+        return value or ""
+
+
+def receipt_text(conn, order, customer):
+    cafe = html_escape(get_settings(conn)["cafe_name"])
+    lines = [f"🧾 <b>{cafe}</b> — xaridingiz uchun rahmat!", f"Buyurtma #{order['id']} · {fmt_date(order.get('closed_at') or now())}", ""]
+    for i in order["items"]:
+        lines.append(f"• {html_escape(i['name'])} × {i['qty']} — {fmt_money(i['price'] * i['qty'])}")
+    lines.append("")
+    if order.get("service"):
+        lines.append(f"Xizmat haqi ({order['service_percent']:g}%): {fmt_money(order['service'])}")
+    if order.get("discount"):
+        lines.append(f"Chegirma: −{fmt_money(order['discount'])}")
+    lines.append(f"<b>Jami: {fmt_money(order['total'])}</b>")
+    lines.append(f"To'lov: {ACCOUNT_NAMES.get(order['payment_method'], order['payment_method'])}")
+    if order["payment_method"] == "debt":
+        debt = one(conn, "SELECT due_date FROM debts WHERE order_id = ? ORDER BY id DESC", order["id"])
+        lines.append(f"\n📌 Qarzga yozildi, to'lov muddati: <b>{fmt_date(debt.get('due_date'))}</b>")
+        lines.append(f"Umumiy qarzingiz: <b>{fmt_money(customer_remaining(conn, customer['id']))}</b>")
+    return "\n".join(lines)
+
+
+def balance_text(conn, customer):
+    debts = [d for d in debts_query(conn, "AND d.customer_id = ?", (customer["id"],)) if d["remaining"] > 0]
+    cafe = html_escape(get_settings(conn)["cafe_name"])
+    if not debts:
+        return f"💰 <b>Balansingiz</b> · {cafe}\n\n✅ Qarzingiz yo'q. Rahmat!"
+    lines = [f"💰 <b>Balansingiz</b> · {cafe}", "", f"Umumiy qarz: <b>{fmt_money(sum(d['remaining'] for d in debts))}</b>", ""]
+    for d in debts:
+        when = (f"⚠️ {-d['days']} kun o'tdi" if d["days"] < 0 else "bugun to'lash kerak" if d["days"] == 0
+                else f"{d['days']} kun qoldi")
+        note = f" ({html_escape(d['comment'])})" if d.get("comment") else ""
+        lines.append(f"• {fmt_money(d['remaining'])} — muddati {fmt_date(d['due_date'])}, {when}{note}")
+    return "\n".join(lines)
+
+
+def orders_text(conn, customer):
+    orders = rows(conn.execute(
+        """SELECT id, total, payment_method, closed_at FROM orders WHERE customer_id = ? AND status = 'paid'
+           ORDER BY id DESC LIMIT 10""", (customer["id"],)))
+    if not orders:
+        return "🧾 Hozircha xaridlar yo'q."
+    lines = ["🧾 <b>Oxirgi xaridlaringiz</b>", ""]
+    for o in orders:
+        lines.append(f"• {fmt_date(o['closed_at'])} · #{o['id']} · <b>{fmt_money(o['total'])}</b> · "
+                     f"{ACCOUNT_NAMES.get(o['payment_method'], o['payment_method'])}")
+    return "\n".join(lines)
+
+
+def customer_bot_reply(conn, update):
+    """Botga kelgan xabarga javoblar: [(chat_id, matn, klaviatura)]. Baza qulfi ostida chaqiriladi."""
+    msg = update.get("message") or {}
+    chat = msg.get("chat") or {}
+    if chat.get("type") != "private":
+        return []
+    chat_id = str(chat["id"])
+    cafe = html_escape(get_settings(conn)["cafe_name"])
+    customer = one(conn, "SELECT * FROM customers WHERE telegram_chat_id = ?", chat_id)
+    contact = msg.get("contact")
+    if contact:
+        if contact.get("user_id") and contact["user_id"] != (msg.get("from") or {}).get("id"):
+            return [(chat_id, "Iltimos, <b>o'zingizning</b> raqamingizni yuboring 👇", CONTACT_KEYBOARD)]
+        try:
+            phone = normalize_phone(contact.get("phone_number"))
+        except ApiError:
+            phone = ""
+        found = one(conn, "SELECT * FROM customers WHERE phone = ?", phone)
+        if not found:
+            return [(chat_id, f"😕 {html_escape(phone)} raqami {cafe} mijozlari ro'yxatida topilmadi.\n"
+                              "Kassirga raqamingizni ayting va keyin qayta urinib ko'ring.", CONTACT_KEYBOARD)]
+        conn.execute("UPDATE customers SET telegram_chat_id = NULL WHERE telegram_chat_id = ?", (chat_id,))
+        conn.execute("UPDATE customers SET telegram_chat_id = ?, telegram_linked_at = ? WHERE id = ?",
+                     (chat_id, now(), found["id"]))
+        conn.commit()
+        return [(chat_id, f"✅ Assalomu alaykum, <b>{html_escape(found['name'])}</b>!\n"
+                          f"Siz {cafe} botiga ulandingiz. Endi xaridlaringiz cheki va to'lovlar shu yerga keladi.\n"
+                          f"Qarzingizni ko'rish uchun <b>{BTN_BALANCE}</b> ni bosing.", MAIN_KEYBOARD),
+                (chat_id, balance_text(conn, found), MAIN_KEYBOARD)]
+    if not customer:
+        return [(chat_id, f"Assalomu alaykum! <b>{cafe}</b> botiga xush kelibsiz.\n"
+                          "Balansingiz va xaridlaringizni ko'rish uchun telefon raqamingizni yuboring 👇", CONTACT_KEYBOARD)]
+    text = (msg.get("text") or "").strip()
+    if text in (BTN_BALANCE, "/balans", "/balance"):
+        return [(chat_id, balance_text(conn, customer), MAIN_KEYBOARD)]
+    if text in (BTN_ORDERS, "/xaridlar"):
+        return [(chat_id, orders_text(conn, customer), MAIN_KEYBOARD)]
+    return [(chat_id, f"Salom, {html_escape(customer['name'])}! Quyidagi tugmalardan foydalaning 👇", MAIN_KEYBOARD)]
+
+
+class CustomerBotPoller:
+    """Mijozlar botiga kelgan xabarlarni orqa fonda o'qiydi (long polling - webhook/oq IP kerak emas)."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.offset = 0
+        self.token = None
+        self.last_error = None
+
+    def start(self):
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def run(self):
+        import time
+        while True:
+            with db_lock:
+                enabled, cfg = customer_bot_config(self.conn)
+            token = cfg.get("token") if enabled else None
+            if token != self.token:
+                self.token, self.offset = token, 0
+            if not token:
+                time.sleep(3)
+                continue
+            try:
+                updates = telegram.get_updates(token, self.offset)
+                self.last_error = None
+            except telegram.TelegramError as e:
+                self.last_error = f"{time.strftime('%H:%M:%S')} · {e}"
+                time.sleep(5)
+                continue
+            for upd in updates:
+                self.offset = max(self.offset, upd.get("update_id", 0) + 1)
+                try:
+                    with db_lock:
+                        replies = customer_bot_reply(self.conn, upd)
+                    for chat_id, text, keyboard in replies:
+                        telegram.send_message(token, chat_id, text, keyboard)
+                except Exception as e:  # bitta xabar xatosi botni to'xtatmasin
+                    self.last_error = f"{time.strftime('%H:%M:%S')} · {e}"
+
+
+customer_poller = None
+
+
+def customer_bot_public(conn):
+    enabled, cfg = customer_bot_config(conn)
+    linked = conn.execute("SELECT COUNT(*) FROM customers WHERE telegram_chat_id IS NOT NULL").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
+    n = telegram.customer_notifier
+    return {
+        "enabled": enabled, "token_set": bool(cfg.get("token")), "bot": cfg.get("bot"),
+        "notify_sales": cfg["notify_sales"], "notify_payments": cfg["notify_payments"],
+        "linked": linked, "customers": total,
+        "status": {"last_ok": n.last_ok, "sent": n.sent,
+                   "last_error": n.last_error or (customer_poller.last_error if customer_poller else None)},
+    }
+
+
+@route("GET", "/api/integrations/customer-bot", ("integrations",))
+def get_customer_bot(conn, user, params, data, query):
+    return customer_bot_public(conn)
+
+
+@route("POST", "/api/integrations/customer-bot/connect", ("integrations",))
+def connect_customer_bot(conn, user, params, data, query):
+    token = (data.get("token") or "").strip()
+    if not re.fullmatch(r"\d{5,15}:[A-Za-z0-9_-]{20,100}", token):
+        raise ApiError(400, "Token noto'g'ri. @BotFather bergan tokenni to'liq nusxalang")
+    if token == get_integration(conn, "telegram")[1].get("token"):
+        raise ApiError(400, "Bu token xodimlar botiniki. Mijozlar uchun @BotFather'da alohida bot yarating")
+
+    def run():
+        try:
+            me = telegram.get_me(token)
+        except telegram.TelegramError as e:
+            raise ApiError(502, str(e))
+        bot = {k: me.get(k) for k in ("id", "username", "first_name")}
+        with db_lock:
+            try:
+                _, cfg = customer_bot_config(conn)
+                old_id = (cfg.get("bot") or {}).get("id") or cfg.get("last_bot_id")
+                if old_id and old_id != bot["id"]:  # boshqa bot - eski ulanishlar ishlamaydi
+                    conn.execute("UPDATE customers SET telegram_chat_id = NULL, telegram_linked_at = NULL")
+                cfg.update(token=token, bot=bot)
+                cfg.pop("last_bot_id", None)
+                save_integration(conn, "customer_bot", True, cfg)
+                write_journal(conn, user, "crm", entry("Mijozlar boti ulandi", "@" + str(bot["username"])), "customer_bot")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            return customer_bot_public(conn)
+    return Deferred(run)
+
+
+@route("PUT", "/api/integrations/customer-bot", ("integrations",))
+def save_customer_bot(conn, user, params, data, query):
+    enabled, cfg = customer_bot_config(conn)
+    if not cfg.get("token"):
+        raise ApiError(400, "Avval botni ulang")
+    for k in CUSTOMER_BOT_DEFAULTS:
+        if k in data:
+            cfg[k] = bool(data[k])
+    save_integration(conn, "customer_bot", bool(data.get("enabled", enabled)), cfg)
+    return customer_bot_public(conn)
+
+
+@route("DELETE", "/api/integrations/customer-bot", ("integrations",))
+def disconnect_customer_bot(conn, user, params, data, query):
+    _, cfg = customer_bot_config(conn)
+    save_integration(conn, "customer_bot", False, {"last_bot_id": (cfg.get("bot") or {}).get("id")})
+    write_journal(conn, user, "crm", entry("Mijozlar boti uzildi"), "customer_bot")
+    return customer_bot_public(conn)
+
+
+@route("POST", "/api/customers/message", ("crm",))
+def send_customer_message(conn, user, params, data, query):
+    """Mijozlarga bot orqali xabar: hammaga (all=true) yoki tanlanganlarga (customer_ids)."""
+    enabled, cfg = customer_bot_config(conn)
+    if not enabled or not cfg.get("token"):
+        raise ApiError(400, "Mijozlar boti ulanmagan (Integratsiyalar → Mijozlar boti)")
+    text = (data.get("text") or "").strip()
+    if len(text) < 2:
+        raise ApiError(400, "Xabar matnini yozing")
+    if len(text) > 3500:
+        raise ApiError(400, "Xabar juda uzun (3500 belgigacha)")
+    sql = "SELECT id, name, telegram_chat_id FROM customers WHERE telegram_chat_id IS NOT NULL"
+    args = []
+    if not data.get("all"):
+        ids = [to_int(i, "customer_ids") for i in (data.get("customer_ids") or [])]
+        if not ids:
+            raise ApiError(400, "Mijozlarni tanlang")
+        sql += f" AND id IN ({','.join('?' * len(ids))})"
+        args = ids
+    targets = rows(conn.execute(sql, args))
+    if not targets:
+        raise ApiError(400, "Tanlangan mijozlarning hech biri botga ulanmagan")
+    cafe = html_escape(get_settings(conn)["cafe_name"])
+    body = f"📢 <b>{cafe}</b>\n\n{html_escape(text)}"
+    for t in targets:
+        notify_customer(conn, t, body)
+    return {"sent": len(targets), "names": [t["name"] for t in targets[:20]]}
+
+
 # --- jurnal sahifasi
 
 
@@ -2963,6 +3421,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_static(url.path)
             return self.send_json(404, {"error": "Topilmadi"})
         self.telegram_out = None
+        OUTBOX.items = []
         try:
             data = self.read_json() if method in ("POST", "PUT") else {}
             with db_lock:
@@ -2975,6 +3434,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise
             if self.telegram_out:  # faqat saqlangan (commit) amallar Telegramga boradi
                 telegram.notifier.send(*self.telegram_out)
+            for message in OUTBOX.items:  # mijozlarga cheklar va xabarlar
+                telegram.customer_notifier.send(*message)
+            OUTBOX.items = []
             status, payload, headers = result
             if isinstance(payload, Deferred):
                 payload = payload.fn()
@@ -3046,18 +3508,22 @@ class Handler(BaseHTTPRequestHandler):
         return 200, user, {"Set-Cookie": cookie}
 
 
-def make_server(port=PORT, host="0.0.0.0"):
+def make_server(port=PORT, host="0.0.0.0", poll_bots=False):
     conn = connect()
     init_db(conn)
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
     server.conn = conn
+    if poll_bots:  # mijozlar botiga kelgan xabarlarni o'qish
+        global customer_poller
+        customer_poller = CustomerBotPoller(conn)
+        customer_poller.start()
     return server
 
 
 def main():
     try:
-        server = make_server()
+        server = make_server(poll_bots=True)
     except OSError:
         print(f"XATO: {PORT}-port band. CafePOS allaqachon ishlayotgan bo'lishi mumkin.")
         print(f"Brauzerda oching: http://localhost:{PORT}")
