@@ -41,6 +41,9 @@ Dastur litsenziya kaliti bilan ishlaydi (`CAFE-XXXX-XXXX-XXXX-XXXX`). Kalit admi
 (https://cafepos-adminka.netlify.app) yaratiladi va muddati o'sha yerda uzaytiriladi.
 
 - Birinchi ochilishda dastur kalitni so'raydi. Kalit **shu kompyuterga bog'lanadi** (internet kerak).
+- Kalitdan keyin bir marta **ro'yxatdan o'tish formasi** chiqadi: filial (nomi, kompaniya, tuman, manzil,
+  Telegram telefoni, QQS), rekvizitlar (INN, shartnoma raqami) va direktor (F.I.Sh., telefon, yangi 4 raqamli parol).
+  Filial nomi kafe nomi bo'ladi, direktor esa administrator; ma'lumotlar adminkaga ham yuboriladi.
 - Dastur ishga tushganda va har 6 soatda muddatni serverdan tekshiradi. To'lov qabul qilingach,
   yangi muddat o'zi olinadi (yoki ekrandagi **"Qayta tekshirish"** tugmasi bilan darhol).
 - Internet bo'lmasa, dastur oxirgi tekshiruvdan keyin **7 kungacha** ishlaydi.

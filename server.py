@@ -2278,6 +2278,71 @@ def user_values(conn, user, data, target=None):
     return first, last, f"{first} {last}".strip(), phone, data["role"], perms
 
 
+# --- ro'yxatdan o'tish (kalit kiritilgandan keyin bir marta)
+
+ONBOARDING_FIELDS = (("name", 120), ("company", 160), ("district", 80), ("address", 250), ("note", 500),
+                     ("inn", 20), ("contract_no", 60), ("director_name", 120))
+
+
+def is_onboarded(conn):
+    return bool(conn.execute("SELECT 1 FROM settings WHERE key = '_onboarded'").fetchone())
+
+
+def default_pin_active(conn):
+    """Standart PIN (1234) hali o'zgartirilmaganmi - shunda ro'yxatdan o'tishda yangi PIN so'raladi."""
+    return bool(conn.execute("SELECT 1 FROM users WHERE pin_lookup = ?", (pin_hash(conn, DEFAULT_PIN),)).fetchone())
+
+
+def save_onboarding(conn, data):
+    """Filial, rekvizitlar va direktor ma'lumotlarini saqlaydi. Adminkaga yuboriladigan profilni qaytaradi."""
+    profile = {}
+    for key, limit in ONBOARDING_FIELDS:
+        value = str(data.get(key) or "").strip()[:limit]
+        if value:
+            profile[key] = value
+    if not profile.get("name"):
+        raise ApiError(400, "Filial nomini kiriting")
+    if not profile.get("director_name"):
+        raise ApiError(400, "Direktorning F.I.Sh. ni kiriting")
+    profile["director_phone"] = normalize_phone(data.get("director_phone"))
+    if str(data.get("telegram_phone") or "").strip():
+        profile["telegram_phone"] = normalize_phone(data["telegram_phone"])
+    if str(data.get("inn") or "").strip() and not re.fullmatch(r"\d{9}|\d{14}", profile["inn"]):
+        raise ApiError(400, "INN 9 ta (yoki JSHSHIR 14 ta) raqamdan iborat bo'lishi kerak")
+    if data.get("vat_percent") not in (None, ""):
+        profile["vat_percent"] = to_percent(data["vat_percent"], "QQS")
+
+    # Direktor - dasturning administratori
+    admin = conn.execute("SELECT id FROM users WHERE role = 'admin' AND active = 1 ORDER BY id LIMIT 1").fetchone()
+    if not admin:
+        raise ApiError(500, "Administrator hisobi topilmadi")
+    digits = re.sub(r"\D", "", profile["director_phone"])
+    for other in conn.execute("SELECT id, phone FROM users WHERE active = 1 AND phone IS NOT NULL AND id != ?", (admin["id"],)):
+        if re.sub(r"\D", "", other["phone"])[-9:] == digits[-9:]:
+            raise ApiError(409, f"{profile['director_phone']} raqamli xodim allaqachon bor")
+    first, _, last = profile["director_name"].partition(" ")
+    conn.execute("UPDATE users SET full_name = ?, first_name = ?, last_name = ?, phone = ? WHERE id = ?",
+                 (profile["director_name"], first, last.strip(), profile["director_phone"], admin["id"]))
+    if default_pin_active(conn) or data.get("pin") not in (None, ""):
+        pin = str(data.get("pin") or "").strip()
+        if pin == DEFAULT_PIN:
+            raise ApiError(400, f"{DEFAULT_PIN} - standart parol, boshqasini tanlang")
+        if pin != str(data.get("pin2") or "").strip():
+            raise ApiError(400, "Parollar bir xil emas")
+        # standart PIN boshqa xodimda qolgan bo'lsa ham o'chadi - u hammaga ma'lum
+        conn.execute("UPDATE users SET pin_lookup = NULL WHERE pin_lookup = ? AND id != ?",
+                     (pin_hash(conn, DEFAULT_PIN), admin["id"]))
+        set_pin(conn, admin["id"], pin)
+
+    for key, value in (("cafe_name", profile["name"]), ("_profile", json.dumps(profile, ensure_ascii=False)),
+                       ("_onboarded", now())):
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+    return profile
+
+
 def check_password(password):
     if len(password or "") < 4:
         raise ApiError(400, "Parol kamida 4 belgi bo'lishi kerak")
@@ -3580,8 +3645,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path.startswith("/api/license"):  # baza qulfisiz - serverga so'rov uzoq davom etishi mumkin
                 return self.send_json(200, self.handle_license(lic, method, url.path, data))
             if lic:
-                st = lic.status()
-                if not st["ok"]:  # litsenziya yo'q yoki muddati tugagan - dastur ishlamaydi
+                st = self.license_state(lic)
+                if not st["ok"]:  # litsenziya yo'q, muddati tugagan yoki ro'yxatdan o'tilmagan - dastur ishlamaydi
                     return self.send_json(402, {"error": st["message"], "license": st})
             with db_lock:
                 conn = self.server.conn
@@ -3608,13 +3673,24 @@ class Handler(BaseHTTPRequestHandler):
             self.log_message("XATO: %r", e)
             self.send_json(500, {"error": "Serverda xato: " + str(e)})
 
+    def license_state(self, lic):
+        """Litsenziya holati. Kalit joyida, lekin ro'yxatdan o'tilmagan bo'lsa - "setup" holati."""
+        st = lic.status()
+        if st["ok"] and not getattr(self.server, "onboarded", True):
+            with db_lock:
+                pin_required = default_pin_active(self.server.conn)
+            st = dict(st, ok=False, state="setup", pin_required=pin_required,
+                      message="Dasturdan foydalanishni boshlash uchun ma'lumotlarni to'ldiring")
+        return st
+
     def handle_license(self, lic, method, path, data):
         if not lic:  # litsenziya tekshiruvi o'chirilgan (testlar)
             return {"ok": True, "state": "off", "warn": False}
         if method == "GET" and path == "/api/license":
-            return lic.status()
+            return self.license_state(lic)
         if method == "POST" and path == "/api/license/refresh":
-            return lic.refresh_throttled()
+            lic.refresh_throttled()
+            return self.license_state(lic)
         if method == "POST" and path == "/api/license/activate":
             ip = self.client_address[0]
             wait = LICENSE_GUARD.blocked(ip)
@@ -3623,12 +3699,26 @@ class Handler(BaseHTTPRequestHandler):
             if lic.status()["ok"]:
                 raise ApiError(403, "Litsenziya allaqachon faol")
             try:
-                result = lic.activate(data.get("key"))
+                lic.activate(data.get("key"))
             except licensing.LicenseError as e:
                 LICENSE_GUARD.fail(ip)
                 raise ApiError(400, str(e))
             LICENSE_GUARD.ok(ip)
-            return result
+            return self.license_state(lic)
+        if method == "POST" and path == "/api/license/setup":
+            if self.license_state(lic)["state"] != "setup":
+                raise ApiError(403, "Ro'yxatdan o'tish allaqachon bajarilgan")
+            with db_lock:
+                conn = self.server.conn
+                try:
+                    profile = save_onboarding(conn, data)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            self.server.onboarded = True
+            lic.set_profile(profile)  # adminkaga yuboriladi (aloqa bo'lmasa - keyinroq, fon rejimida)
+            return self.license_state(lic)
         raise ApiError(404, "Topilmadi")
 
     def handle_api(self, conn, method, path, data, query):
@@ -3725,6 +3815,7 @@ def main():
         sys.exit(1)
     # Litsenziya: kalit adminka serverida tekshiriladi (fon rejimida, har 6 soatda)
     server.license = licensing.LicenseManager()
+    server.onboarded = is_onboarded(server.conn)  # kalitdan keyin ro'yxatdan o'tish formasi to'ldirilganmi
     server.license.start_background()
     url = f"http://localhost:{PORT}"
     # TOXTATISH.bat serverni shu raqam orqali to'xtatadi

@@ -74,12 +74,18 @@ class FakeServer:
         self.blocked = False
         self.down = False
         self.calls = []
+        self.profile = None
 
     def post(self, url, payload):
         action = url.rsplit("/", 1)[1]
         self.calls.append(action)
         if self.down:
             raise licensing._Network("aloqa yo'q")
+        if action == "profile":
+            if payload["key"] != KEY or self.device != payload["device_id"]:
+                return 409, {"ok": False, "code": "device_mismatch"}
+            self.profile = payload["profile"]
+            return 200, {"ok": True}
         if payload["key"] != KEY:
             return 404, {"ok": False, "code": "invalid_key"}
         if self.blocked:
@@ -224,6 +230,20 @@ class ManagerTest(unittest.TestCase):
             lic.activate(KEY)
         self.assertEqual(lic.status()["state"], "none")
 
+    def test_profile_sent_and_retried(self):
+        self.lic.activate(KEY)
+        self.srv.down = True
+        self.assertFalse(self.lic.set_profile({"name": "Rayhon", "director_name": "Aziz"}))
+        self.assertIsNone(self.srv.profile)
+        self.srv.down = False
+        self.assertTrue(self.lic.refresh()["ok"])  # tekshiruv ma'lumotlarni o'chirib yubormaydi
+        lic = self.manager()  # qayta ishga tushgandan keyin ham yuboriladi
+        self.assertTrue(lic.send_profile())
+        self.assertEqual(self.srv.profile, {"name": "Rayhon", "director_name": "Aziz"})
+        self.srv.calls.clear()
+        self.assertTrue(lic.send_profile())  # ikkinchi marta yuborilmaydi
+        self.assertEqual(self.srv.calls, [])
+
     def test_expired_on_activation_unlocks_after_payment(self):
         self.srv.expires = T0 - DAY
         self.assertEqual(self.lic.activate(KEY)["state"], "expired")
@@ -289,8 +309,43 @@ class ServerGateTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("mavjud emas", body["error"])
 
+        self.server.onboarded = False  # yangi o'rnatilgan dastur: kalitdan keyin ro'yxatdan o'tish so'raladi
         status, body = self.call("POST", "/api/license/activate", {"key": KEY})
-        self.assertEqual((status, body["ok"]), (200, True))
+        self.assertEqual((status, body["ok"], body["state"], body["pin_required"]), (200, False, "setup", True))
+        status, body = self.call("POST", "/api/login", login)
+        self.assertEqual((status, body["license"]["state"]), (402, "setup"))
+
+        form = {"name": "Rayhon Kafe", "company": "Rayhon MChJ", "district": "Chilonzor", "address": "Bunyodkor 1",
+                "telegram_phone": "+998901112233", "vat_percent": "12", "inn": "123456789", "contract_no": "SH-7",
+                "director_name": "Aziz Karimov", "director_phone": "+998 90 111 22 33", "note": "",
+                "pin": "4321", "pin2": "4321"}
+        setup = lambda **over: self.call("POST", "/api/license/setup", dict(form, **over))  # noqa: E731
+        for over, text in (({"name": " "}, "Filial nomi"), ({"director_name": ""}, "F.I.Sh"),
+                           ({"director_phone": "12"}, "Telefon"), ({"inn": "12ab"}, "INN"),
+                           ({"vat_percent": "150"}, "Foiz"), ({"pin": "1234", "pin2": "1234"}, "standart"),
+                           ({"pin2": "1111"}, "bir xil emas"), ({"pin": "12", "pin2": "12"}, "PIN")):
+            status, body = setup(**over)
+            self.assertEqual(status, 400, over)
+            self.assertIn(text, body["error"])
+        self.assertEqual(self.call("POST", "/api/login", {"pin": "1234"})[0], 402)  # xato urinishlar hech narsani saqlamadi
+
+        status, body = setup()
+        self.assertEqual((status, body["ok"], body["state"]), (200, True, "ok"))
+        self.assertEqual(self.fake.profile["name"], "Rayhon Kafe")  # adminkaga yuborildi
+        self.assertEqual(self.fake.profile["director_phone"], "+998901112233")
+        self.assertEqual(self.fake.profile["vat_percent"], 12)
+        self.assertNotIn("pin", self.fake.profile)  # parol hech qachon tashqariga yuborilmaydi
+        self.assertEqual(setup()[0], 403)  # ikkinchi marta to'ldirib bo'lmaydi
+
+        self.assertEqual(self.call("POST", "/api/login", {"pin": "1234"})[0], 401)  # standart parol endi ishlamaydi
+        status, user = self.call("POST", "/api/login", {"pin": "4321"})
+        self.assertEqual((status, user["full_name"], user["role"]), (200, "Aziz Karimov", "admin"))
+        import server
+        conn = self.server.conn
+        with server.db_lock:
+            self.assertEqual(server.get_settings(conn)["cafe_name"], "Rayhon Kafe")
+            self.assertTrue(server.is_onboarded(conn))
+            self.assertNotIn("_profile", server.get_settings(conn))
         self.assertEqual(self.call("POST", "/api/login", login)[0], 200)
         self.assertEqual(self.call("POST", "/api/license/activate", {"key": KEY})[0], 403)
 

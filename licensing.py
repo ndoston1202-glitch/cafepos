@@ -321,11 +321,16 @@ class LicenseManager:
                 payload = verify_token(body["token"], self.public_key)
                 if not payload or payload.get("device_id") != self.device or payload.get("key") != key:
                     return False  # soxta server yoki buzilgan javob - e'tiborga olinmaydi
-                self.data = {"key": key, "token": body["token"], "last_seen": self.clock()}
+                data = {"key": key, "token": body["token"], "last_seen": self.clock()}
             elif body.get("code") in DENY_CODES:
-                self.data = {"key": key, "denied": {"code": body["code"], "expires_at": body.get("expires_at")}}
+                data = {"key": key, "denied": {"code": body["code"], "expires_at": body.get("expires_at")}}
             else:
                 return False
+            if self.data.get("profile"):  # ro'yxatdan o'tish ma'lumotlari saqlanib qoladi
+                data["profile"] = self.data["profile"]
+                # boshqa kalit kiritilgan bo'lsa, ma'lumotlar yangi kalitga qayta yuboriladi
+                data["profile_sent"] = bool(self.data.get("profile_sent")) and self.data.get("key") == key
+            self.data = data
             self.save()
             return True
 
@@ -370,6 +375,34 @@ class LicenseManager:
             return self.status()
         return self.refresh()
 
+    # --- ro'yxatdan o'tish ma'lumotlari (adminkaga yuboriladi)
+
+    def set_profile(self, profile):
+        """Ma'lumotlarni saqlaydi va adminkaga yuboradi. Aloqa bo'lmasa, fon oqimi keyinroq qayta yuboradi."""
+        with self.lock:
+            self.data["profile"] = profile
+            self.data["profile_sent"] = False
+            self.save()
+        return self.send_profile()
+
+    def send_profile(self):
+        with self.lock:
+            key, profile = self.data.get("key"), self.data.get("profile")
+            if not key or not profile or self.data.get("profile_sent"):
+                return bool(self.data.get("profile_sent"))
+        try:
+            status, body = self.post("%s/api/v1/profile" % self.server_url,
+                                     {"key": key, "device_id": self.device, "profile": profile})
+        except _Network:
+            return False
+        if status != 200 or not body.get("ok"):
+            return False
+        with self.lock:
+            if self.data.get("key") == key and self.data.get("profile") == profile:
+                self.data["profile_sent"] = True
+                self.save()
+        return True
+
     # --- fon tekshiruvi
 
     def start_background(self):
@@ -381,6 +414,8 @@ class LicenseManager:
         while True:
             try:
                 st = self.refresh()
+                if st.get("ok"):
+                    self.send_profile()  # avval yuborilmay qolgan bo'lsa
             except Exception as e:  # fon oqimi hech qachon to'xtamasin
                 print("Litsenziya tekshiruvida xato: %r" % (e,))
                 st = {"ok": False}

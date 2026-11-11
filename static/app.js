@@ -271,6 +271,7 @@ function renderLicense(lic) {
   clearInterval(state.licenseTimer);
   document.removeEventListener("keydown", state.pinKeys);
   closeModal();
+  if (lic.state === "setup") return renderSetup(lic);
   const expired = lic.expires_at ? `<p class="lic-info">Muddat: <b>${esc(fmtLicenseDate(lic.expires_at))}</b> gacha edi</p>` : "";
   $("#app").innerHTML = `
     <div class="auth">
@@ -331,6 +332,107 @@ function renderLicense(lic) {
       if (next.ok) await done(next);
     } catch { /* server javob bermadi - keyingi safar */ }
   }, 30000);
+}
+
+const DISTRICTS = ["Bektemir", "Chilonzor", "Mirobod", "Mirzo Ulug'bek", "Olmazor", "Sergeli", "Shayxontohur",
+  "Uchtepa", "Yakkasaroy", "Yangihayot", "Yashnobod", "Yunusobod"];
+
+// Kalit kiritilgandan keyin bir marta: filial, rekvizitlar va direktor ma'lumotlari
+function renderSetup(lic) {
+  const field = (name, label, attrs = "") => `
+    <label class="setup-field">${label}<input name="${name}" ${attrs}></label>`;
+  const phone = (name, label, required) => `
+    <label class="setup-field">${label}
+      <span class="setup-phone"><b>+998</b><input name="${name}" inputmode="numeric" placeholder="(99) 999-99-99"
+        maxlength="14" ${required ? "required" : ""}></span></label>`;
+  $("#app").innerHTML = `
+    <div class="auth setup-wrap">
+      <div class="auth-glow"></div>
+      <form class="setup-card" id="setup-form" novalidate>
+        <img class="setup-logo" src="/img/logo.png" alt="CafePos">
+        <h2>Ro'yxatdan o'tish</h2>
+        <p class="lic-msg">Kalit qabul qilindi${lic.customer ? ` (${esc(lic.customer)})` : ""}. Boshlash uchun ma'lumotlarni to'ldiring.</p>
+
+        <fieldset><legend>Filial</legend>
+          <div class="setup-grid">
+            ${field("name", "Nomlanish *", 'required maxlength="120" placeholder="Kafe nomi"')}
+            ${field("company", "Kompaniya", 'maxlength="160" placeholder="MChJ yoki YaTT nomi"')}
+            ${field("district", "Tuman", 'maxlength="80" list="setup-districts" placeholder="Tanlang yoki yozing"')}
+            ${field("address", "Manzil", 'maxlength="250"')}
+            ${phone("telegram_phone", "Telegramdagi telefon", false)}
+            ${field("vat_percent", "QQS (%)", 'inputmode="decimal" maxlength="5" placeholder="0"')}
+          </div>
+          <datalist id="setup-districts">${DISTRICTS.map((d) => `<option value="${esc(d)}">`).join("")}</datalist>
+          <label class="setup-field">Izoh<textarea name="note" rows="2" maxlength="500"></textarea></label>
+        </fieldset>
+
+        <fieldset><legend>Rekvizitlar</legend>
+          <div class="setup-grid">
+            ${field("inn", "INN", 'inputmode="numeric" maxlength="14"')}
+            ${field("contract_no", "Shartnoma raqami", 'maxlength="60"')}
+          </div>
+        </fieldset>
+
+        <fieldset><legend>Direktor</legend>
+          <div class="setup-grid">
+            ${field("director_name", "Direktorning F.I.Sh. *", 'required maxlength="120"')}
+            ${phone("director_phone", "Telefon *", true)}
+            ${lic.pin_required ? `
+              ${field("pin", "Yangi parol (4 ta raqam) *", 'type="password" inputmode="numeric" maxlength="4" required autocomplete="new-password"')}
+              ${field("pin2", "Parolni takrorlang *", 'type="password" inputmode="numeric" maxlength="4" required autocomplete="new-password"')}` : ""}
+          </div>
+          ${lic.pin_required ? '<p class="setup-hint">Bu parol bilan dasturga administrator sifatida kirasiz. Uni eslab qoling.</p>' : ""}
+        </fieldset>
+
+        <div class="pin-error" id="setup-error"></div>
+        <button class="lic-btn" id="setup-save">Saqlash va boshlash</button>
+      </form>
+    </div>`;
+  const form = $("#setup-form");
+  // Telefon: faqat raqamlar, (90) 123-45-67 ko'rinishida
+  $$(".setup-phone input", form).forEach((input) => input.addEventListener("input", () => {
+    const d = input.value.replace(/\D/g, "").replace(/^998(?=\d{9})/, "").slice(0, 9);
+    input.value = [d.slice(0, 2) && `(${d.slice(0, 2)}`, d.length > 2 ? `) ${d.slice(2, 5)}` : "",
+      d.length > 5 ? `-${d.slice(5, 7)}` : "", d.length > 7 ? `-${d.slice(7, 9)}` : ""].join("");
+  }));
+  $$("[name=pin], [name=pin2], [name=inn]", form).forEach((input) => input.addEventListener("input", () => {
+    input.value = input.value.replace(/\D/g, "");
+  }));
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const error = (msg, name) => {
+      $("#setup-error").textContent = msg;
+      if (name) form.elements[name].focus();
+    };
+    const data = {};
+    $$("input, textarea", form).forEach((el) => { data[el.name] = el.value.trim(); });
+    for (const name of ["telegram_phone", "director_phone"]) {
+      const digits = data[name].replace(/\D/g, "");
+      if (digits && digits.length !== 9) return error("Telefon raqamini to'liq kiriting", name);
+      data[name] = digits ? "+998" + digits : "";
+    }
+    if (!data.name) return error("Filial nomini kiriting", "name");
+    if (!data.director_name) return error("Direktorning F.I.Sh. ni kiriting", "director_name");
+    if (!data.director_phone) return error("Direktor telefonini kiriting", "director_phone");
+    if (lic.pin_required) {
+      if (!/^\d{4}$/.test(data.pin)) return error("Parol 4 ta raqam bo'lishi kerak", "pin");
+      if (data.pin !== data.pin2) return error("Parollar bir xil emas", "pin2");
+    }
+    error("");
+    const btn = $("#setup-save");
+    btn.disabled = true;
+    try {
+      const next = await api("POST", "/api/license/setup", data);
+      if (!next.ok) return renderLicense(next);
+      state.license = next;
+      await start();
+    } catch (err) {
+      if ($("#setup-error")) error(err.message);
+    }
+    if (btn.isConnected) btn.disabled = false;
+  });
+  form.addEventListener("input", () => { $("#setup-error").textContent = ""; });
+  form.elements.name.focus();
 }
 
 // Muddat tugashiga oz qolganda eslatma
