@@ -35,6 +35,21 @@ Login: **admin** · Parol: **admin123** — kirgandan keyin *Xodimlar* bo'limida
 
 Linux/macOS: `python3 desktop.py` (yoki faqat server: `python3 server.py`)
 
+## 🔑 Litsenziya
+
+Dastur litsenziya kaliti bilan ishlaydi (`CAFE-XXXX-XXXX-XXXX-XXXX`). Kalit adminkada
+(https://cafepos-adminka.netlify.app) yaratiladi va muddati o'sha yerda uzaytiriladi.
+
+- Birinchi ochilishda dastur kalitni so'raydi. Kalit **shu kompyuterga bog'lanadi** (internet kerak).
+- Dastur ishga tushganda va har 6 soatda muddatni serverdan tekshiradi. To'lov qabul qilingach,
+  yangi muddat o'zi olinadi (yoki ekrandagi **"Qayta tekshirish"** tugmasi bilan darhol).
+- Internet bo'lmasa, dastur oxirgi tekshiruvdan keyin **7 kungacha** ishlaydi.
+- Muddat tugashiga 5 kun qolganda kirishda eslatma chiqadi. Muddat tugasa yoki kalit bloklansa, dastur to'xtaydi.
+- Kompyuter almashtirilsa: adminkada kalit sahifasida **"Qurilmani uzish"** bosiladi, keyin kalit yangi kompyuterda kiritiladi.
+
+Litsenziya holati `license.json` faylida saqlanadi (uni boshqa kompyuterga ko'chirib bo'lmaydi).
+Kod: `licensing.py`, testlar: `tests/test_license.py`.
+
 ## ✨ Imkoniyatlar
 
 - 🏛️ **Zallar** — Asosiy zal, Banket zali, Kabinalar va h.k.; stollar zal bo'yicha ko'rinadi

@@ -6,3 +6,5 @@ uploads/
 cafepos.pid
 cafepos.log
 android/build/
+license.json
+license.json.tmp

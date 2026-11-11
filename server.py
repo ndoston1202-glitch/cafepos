@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from xml.etree import ElementTree
 
+import licensing
 import printing
 import telegram
 import xlsx
@@ -3465,6 +3466,7 @@ class LoginGuard:
 
 
 LOGIN_GUARD = LoginGuard()
+LICENSE_GUARD = LoginGuard()  # kalitni taxmin qilib topishdan himoya
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3574,6 +3576,13 @@ class Handler(BaseHTTPRequestHandler):
         OUTBOX.items = []
         try:
             data = self.read_json() if method in ("POST", "PUT") else {}
+            lic = getattr(self.server, "license", None)
+            if url.path.startswith("/api/license"):  # baza qulfisiz - serverga so'rov uzoq davom etishi mumkin
+                return self.send_json(200, self.handle_license(lic, method, url.path, data))
+            if lic:
+                st = lic.status()
+                if not st["ok"]:  # litsenziya yo'q yoki muddati tugagan - dastur ishlamaydi
+                    return self.send_json(402, {"error": st["message"], "license": st})
             with db_lock:
                 conn = self.server.conn
                 try:
@@ -3598,6 +3607,29 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # kutilmagan xato - serverni yiqitmaymiz
             self.log_message("XATO: %r", e)
             self.send_json(500, {"error": "Serverda xato: " + str(e)})
+
+    def handle_license(self, lic, method, path, data):
+        if not lic:  # litsenziya tekshiruvi o'chirilgan (testlar)
+            return {"ok": True, "state": "off", "warn": False}
+        if method == "GET" and path == "/api/license":
+            return lic.status()
+        if method == "POST" and path == "/api/license/refresh":
+            return lic.refresh_throttled()
+        if method == "POST" and path == "/api/license/activate":
+            ip = self.client_address[0]
+            wait = LICENSE_GUARD.blocked(ip)
+            if wait:
+                raise ApiError(429, f"Ko'p noto'g'ri urinish. {wait} soniyadan keyin qayta urining")
+            if lic.status()["ok"]:
+                raise ApiError(403, "Litsenziya allaqachon faol")
+            try:
+                result = lic.activate(data.get("key"))
+            except licensing.LicenseError as e:
+                LICENSE_GUARD.fail(ip)
+                raise ApiError(400, str(e))
+            LICENSE_GUARD.ok(ip)
+            return result
+        raise ApiError(404, "Topilmadi")
 
     def handle_api(self, conn, method, path, data, query):
         if method == "POST" and path == "/api/login":
@@ -3691,6 +3723,9 @@ def main():
         print(f"XATO: {PORT}-port band. CafePOS allaqachon ishlayotgan bo'lishi mumkin.")
         print(f"Brauzerda oching: http://localhost:{PORT}")
         sys.exit(1)
+    # Litsenziya: kalit adminka serverida tekshiriladi (fon rejimida, har 6 soatda)
+    server.license = licensing.LicenseManager()
+    server.license.start_background()
     url = f"http://localhost:{PORT}"
     # TOXTATISH.bat serverni shu raqam orqali to'xtatadi
     pid_path = os.path.join(BASE_DIR, "cafepos.pid")

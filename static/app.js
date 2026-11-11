@@ -82,6 +82,11 @@ async function api(method, url, body) {
     renderLogin();
     throw new Error(data.error || "Tizimga kiring");
   }
+  if (res.status === 402 && data.license) {  // litsenziya yo'q yoki muddati tugagan
+    state.user = null;
+    renderLicense(data.license);
+    throw new Error(data.error || "Litsenziya faol emas");
+  }
   if (!res.ok) throw new Error(data.error || "Xato: " + res.status);
   return data;
 }
@@ -243,6 +248,100 @@ function showInstallHelp() {
   });
 }
 
+// ------------------------------------------------------------ litsenziya
+
+const LICENSE_TITLES = {
+  none: "Dasturni aktivlashtirish",
+  expired: "Foydalanish muddati tugadi",
+  blocked: "Litsenziya bloklangan",
+  need_online: "Internet kerak",
+  clock: "Kompyuter soati noto'g'ri",
+};
+
+function fmtLicenseDate(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
+
+// Litsenziya ekrani: kalit kiritish yoki to'lovdan keyin qayta tekshirish
+function renderLicense(lic) {
+  state.license = lic;
+  clearInterval(state.licenseTimer);
+  document.removeEventListener("keydown", state.pinKeys);
+  closeModal();
+  const expired = lic.expires_at ? `<p class="lic-info">Muddat: <b>${esc(fmtLicenseDate(lic.expires_at))}</b> gacha edi</p>` : "";
+  $("#app").innerHTML = `
+    <div class="auth">
+      <div class="auth-glow"></div>
+      <section class="auth-hero">
+        <img class="auth-hero-logo" src="/img/logo.png" alt="CafePos — ERP dasturi">
+        <h1>Kafengiz nazorat ostida<br><span>doim va hamma joyda</span></h1>
+        <p>Stollar, buyurtmalar, oshxona va kassani yagona tizimda boshqaring</p>
+      </section>
+      <form class="lic-card" id="lic-form">
+        <h2>${esc(LICENSE_TITLES[lic.state] || "Litsenziya")}</h2>
+        <p class="lic-msg">${esc(lic.message || "")}</p>
+        ${lic.key ? `<p class="lic-info">Kalit: <b>${esc(lic.key)}</b></p>` : ""}
+        ${lic.state === "expired" ? expired : ""}
+        ${lic.needs_key ? `
+          <input id="lic-key" placeholder="CAFE-XXXX-XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters"
+                 spellcheck="false" maxlength="29">
+          <button class="lic-btn" id="lic-activate">Aktivlashtirish</button>` : ""}
+        ${lic.state !== "none" ? `<button type="button" class="lic-btn ${lic.needs_key ? "ghost" : ""}" id="lic-refresh">Qayta tekshirish</button>` : ""}
+        <div class="pin-error" id="lic-error"></div>
+      </form>
+    </div>`;
+  const error = (msg) => { $("#lic-error").textContent = msg || ""; };
+  const done = async (next) => {
+    if (!next.ok) return renderLicense(next);
+    clearInterval(state.licenseTimer);
+    state.license = next;
+    await start();
+  };
+  const run = async (btn, fn) => {
+    error("");
+    btn.disabled = true;
+    try { await done(await fn()); } catch (e) { error(e.message); }
+    if (btn.isConnected) btn.disabled = false;
+  };
+  const input = $("#lic-key");
+  if (input) {
+    // Yozish davomida CAFE-XXXX-XXXX-XXXX-XXXX ko'rinishiga keltiramiz
+    input.addEventListener("input", () => {
+      const raw = input.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 20);
+      input.value = (raw.match(/.{1,4}/g) || []).join("-");
+    });
+    $("#lic-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      run($("#lic-activate"), () => api("POST", "/api/license/activate", { key: input.value }));
+    });
+    input.focus();
+  } else {
+    $("#lic-form").addEventListener("submit", (e) => e.preventDefault());
+  }
+  const refresh = $("#lic-refresh");
+  if (refresh) refresh.addEventListener("click", () => run(refresh, () => api("POST", "/api/license/refresh")));
+  // To'lov qabul qilingach ekran o'zi ochilishi uchun vaqti-vaqti bilan tekshiramiz
+  state.licenseTimer = setInterval(async () => {
+    if (!$("#lic-form")) return clearInterval(state.licenseTimer);
+    try {
+      const next = await api("GET", "/api/license");
+      if (next.ok) await done(next);
+    } catch { /* server javob bermadi - keyingi safar */ }
+  }, 30000);
+}
+
+// Muddat tugashiga oz qolganda eslatma
+function licenseNotice() {
+  const lic = state.license;
+  if (lic && lic.ok && lic.warn && state.user) {
+    toast(lic.days_left <= 1 ? "Litsenziya muddati bugun-erta tugaydi. To'lovni unutmang!"
+      : `Litsenziya muddati ${lic.days_left} kundan keyin tugaydi (${fmtLicenseDate(lic.expires_at)})`, true);
+  }
+}
+
 const PIN_LENGTH = 4;
 
 function renderLogin() {
@@ -303,7 +402,9 @@ function renderLogin() {
       document.removeEventListener("keydown", state.pinKeys);
       if (!location.hash || location.hash === "#/") location.hash = defaultRoute();
       router();
+      licenseNotice();
     } catch (err) {
+      if (!$("#login-error")) return;  // litsenziya ekrani ochildi
       $("#login-error").textContent = err.message;
       dots.classList.add("shake");
       if (navigator.vibrate) navigator.vibrate(150);
@@ -3212,14 +3313,23 @@ window.addEventListener("hashchange", router);
   document.body.classList.toggle("side-collapsed", collapsed);
 })();
 
-(async function start() {
+async function start() {
+  try {
+    state.license = await api("GET", "/api/license");
+  } catch {
+    state.license = null;  // eski server yoki aloqa yo'q - odatdagidek davom etamiz
+  }
+  if (state.license && !state.license.ok) return renderLicense(state.license);
   try {
     state.user = await api("GET", "/api/me");
     await loadSettings();
   } catch {
     state.user = null;
   }
+  if (state.license && !state.license.ok) return;  // /api/me 402 qaytardi - litsenziya ekrani ko'rsatilgan
   router();
-})();
+  licenseNotice();
+}
+start();
 
 window.__cafeposLoaded = true;

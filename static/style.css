@@ -1134,3 +1134,35 @@ a.integration-card:hover { border-color: var(--primary); box-shadow: 0 6px 18px 
 .receipt-preview hr { border: 0; border-top: 1px dashed #000; margin: 8px 0; }
 .receipt-preview .r-logo { width: 55%; filter: grayscale(1) invert(1); margin-bottom: 6px; }
 @media (max-width: 900px) { .receipt-settings { grid-template-columns: 1fr; } .receipt-preview-wrap { position: static; } }
+
+/* --- litsenziya ekrani */
+.auth:has(.lic-card) { grid-template-columns: 1fr auto; padding-top: 24px; padding-bottom: 24px; }
+.lic-card {
+  position: relative; z-index: 1; width: 360px; max-width: 100%; padding: 28px 26px; border-radius: 22px;
+  background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .1); color: #fff; text-align: center;
+  display: flex; flex-direction: column; gap: 10px; backdrop-filter: blur(8px);
+}
+@media (min-width: 761px) { .lic-card { transform: translate(-80px, 20px); } }
+.lic-card h2 { font-size: 20px; font-weight: 700; margin: 0; }
+.lic-msg { color: #d9cfc6; font-size: 14px; line-height: 1.5; margin: 0 0 4px; }
+.lic-info { color: #b9aea4; font-size: 13px; margin: 0; }
+.lic-info b { color: #e3a063; font-family: ui-monospace, Consolas, monospace; letter-spacing: .03em; }
+.lic-card input {
+  width: 100%; margin: 6px 0 0; padding: 13px 12px; border-radius: 12px; text-align: center; font-size: 16px;
+  font-family: ui-monospace, Consolas, monospace; letter-spacing: .05em; text-transform: uppercase;
+  background: rgba(0, 0, 0, .25); border: 1.5px solid rgba(255, 255, 255, .18); color: #fff;
+}
+.lic-card input::placeholder { color: rgba(255, 255, 255, .3); }
+.lic-card input:focus { outline: none; border-color: #e3a063; }
+.lic-btn {
+  width: 100%; padding: 13px; border: 0; border-radius: 12px; background: #d08a4c; color: #fff;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.lic-btn:hover { background: #c07a3e; }
+.lic-btn:disabled { opacity: .6; cursor: wait; }
+.lic-btn.ghost { background: transparent; border: 1.5px solid rgba(227, 160, 99, .5); color: #e3a063; }
+.lic-btn.ghost:hover { background: rgba(208, 138, 76, .12); }
+@media (max-width: 760px) {
+  .auth:has(.lic-card) { grid-template-columns: 1fr; gap: 14px; padding: 16px; min-height: 100vh; min-height: 100dvh; align-content: center; }
+  .lic-card { margin: 0 auto; }
+}
