@@ -275,6 +275,14 @@ class ServerGateTest(unittest.TestCase):
         with urlopen(self.base + "/") as res:  # sahifaning o'zi ochiladi - litsenziya ekrani shu yerda
             self.assertEqual(res.status, 200)
 
+        # Litsenziya bo'lmasa ham ishga tushirgich serverni "ishlayapti" deb bilishi kerak (oyna ochilsin)
+        import desktop
+        old_url, desktop.URL = desktop.URL, self.base + "/"
+        try:
+            self.assertTrue(desktop.server_running())
+        finally:
+            desktop.URL = old_url
+
         status, body = self.call("GET", "/api/license")
         self.assertEqual((status, body["ok"], body["needs_key"]), (200, False, True))
         status, body = self.call("POST", "/api/license/activate", {"key": "CAFE-XXXX-XXXX-XXXX-XXXX"})

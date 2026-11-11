@@ -31,7 +31,8 @@ def server_running():
         with _opener.open(URL + "api/me", timeout=1.5):
             return True
     except urllib.error.HTTPError as e:
-        return e.code == 401  # server javob berdi, faqat hali kirilmagan
+        # server javob berdi: 401 - hali kirilmagan, 402 - litsenziya kiritilmagan yoki muddati tugagan
+        return e.code in (401, 402)
     except OSError:
         return False
 
